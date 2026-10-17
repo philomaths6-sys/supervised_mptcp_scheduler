@@ -67,6 +67,10 @@ public:
     Config::SetDefault ("ns3::TcpSocketBase::EnableMpTcp", BooleanValue (m_enableMptcp));
     Config::SetDefault ("ns3::MpTcpSocketBase::PathManagerMode", EnumValue (MpTcpSocketBase::FullMesh));
 
+    // Increase TCP Send and Receive Buffers to allow Bandwidth-Delay Product (BDP) aggregation
+    Config::SetDefault ("ns3::TcpSocket::RcvBufSize", UintegerValue (1048576)); // 1 MB
+    Config::SetDefault ("ns3::TcpSocket::SndBufSize", UintegerValue (1048576)); // 1 MB
+
     if (m_enableMptcp)
       {
         if (m_schedulerType == "FastestRTT")
@@ -95,16 +99,10 @@ public:
     NodeContainer endHosts;
     endHosts.Create (2);
 
-    InternetStackHelper internet;
-    internet.Install (endHosts);
-
     uint32_t numPaths = m_paths.size ();
     std::vector<NetDeviceContainer> devices;
-    Ipv4AddressHelper ipv4;
 
-    Ipv4Address sinkAddress;
-
-    // Build independent paths
+    // 1. Build independent paths and install NetDevices first
     for (uint32_t i = 0; i < numPaths; ++i)
       {
         PointToPointHelper p2p;
@@ -124,11 +122,22 @@ public:
             em->SetAttribute ("ErrorUnit", EnumValue (RateErrorModel::ERROR_UNIT_PACKET));
             dev.Get (1)->SetAttribute ("ReceiveErrorModel", PointerValue (em));
           }
+      }
 
+    // 2. Install Internet Stack onto nodes
+    InternetStackHelper internet;
+    internet.Install (endHosts);
+
+    // 3. Assign IP subnets to each interface
+    Ipv4AddressHelper ipv4;
+    Ipv4Address sinkAddress;
+
+    for (uint32_t i = 0; i < numPaths; ++i)
+      {
         std::ostringstream subnet;
         subnet << "10.1." << (i + 1) << ".0";
         ipv4.SetBase (subnet.str ().c_str (), "255.255.255.0");
-        Ipv4InterfaceContainer ifCont = ipv4.Assign (dev);
+        Ipv4InterfaceContainer ifCont = ipv4.Assign (devices[i]);
 
         if (i == 0)
           {
@@ -187,6 +196,10 @@ public:
         Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (it->first);
         if (t.destinationPort == port)
           {
+            std::cout << "  [SUBFLOW TRACE] " << t.sourceAddress << ":" << t.sourcePort
+                      << " -> " << t.destinationAddress << ":" << t.destinationPort
+                      << " | TxPkts: " << it->second.txPackets << ", RxPkts: " << it->second.rxPackets
+                      << " | RxBytes: " << it->second.rxBytes << "\n";
             totalTxBytes += it->second.txBytes;
             totalRxBytes += it->second.rxBytes;
             totalTxPackets += it->second.txPackets;

@@ -103,6 +103,18 @@ MpTcpSchedulerFastestRTT::GenerateMapping(int& activeSubflowArrayId, SequenceNum
   NS_LOG_FUNCTION(this);
   NS_ASSERT(m_metaSock);
 
+  static int debugCount = 0;
+  if (debugCount++ < 10)
+    {
+      std::cout << "[SCHEDULER DEBUG] nActiveSubflows=" << m_metaSock->GetNActiveSubflows() << std::endl;
+      for (int i = 0; i < (int)m_metaSock->GetNActiveSubflows(); ++i)
+        {
+          Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
+          std::cout << "  Subflow " << i << ": rtt=" << sf->m_rtt->GetEstimate().GetMilliSeconds()
+                    << "ms, cWnd=" << sf->m_tcb->m_cWnd << ", availWnd=" << sf->AvailableWindow() << std::endl;
+        }
+    }
+
   uint32_t amountOfDataToSend = 0;
   //! Tx data not sent to subflows yet
   SequenceNumber32 metaNextTxSeq = m_metaSock->Getvalue_nextTxSeq();
