@@ -106,11 +106,15 @@ int main (int argc, char *argv[])
     }
   std::cout << "Dynamic Scenario        : " << res.scenarioName << "\n";
   std::cout << "Protocol / Scheduler    : " << res.scheduler << "\n";
-  std::cout << "Duration Active         : " << res.durationSeconds << " s\n";
+  std::cout << "Duration Session        : " << res.durationSeconds << " s\n";
+  std::cout << "Active Transfer Time    : " << res.activeTransferSec << " s\n";
   std::cout << "Total Data Transferred  : " << res.totalRxBytes << " bytes ("
             << (res.totalRxBytes / 1024.0 / 1024.0) << " MB)\n";
-  std::cout << "Effective Goodput       : " << res.goodputMbps << " Mbps\n";
-  std::cout << "Est Avg Latency (RTT)   : " << res.avgLatencyMs << " ms\n";
+  std::cout << "Active Throughput       : " << res.throughputMbps << " Mbps\n";
+  std::cout << "Session Goodput         : " << res.goodputMbps << " Mbps\n";
+  std::cout << "Measured Avg RTT        : " << res.avgLatencyMs << " ms\n";
+  std::cout << "Total Packets Tx / Rx   : " << res.totalTxPackets << " / " << res.totalRxPackets << "\n";
+  std::cout << "Retransmissions / Lost  : " << res.retransmissions << " (" << res.packetLossRate << "% loss rate)\n";
   std::cout << "======================================================\n\n";
 
   if (!outputCsv.empty ())
@@ -126,12 +130,17 @@ int main (int argc, char *argv[])
       std::ofstream csvOut (outputCsv.c_str (), std::ios::app);
       if (writeHeader)
         {
-          csvOut << "profile,scenario,scheduler,numPaths,totalRxBytes,durationSec,goodputMbps,latencyMs\n";
+          csvOut << "profile,scenario,scheduler,numPaths,totalRxBytes,durationSec,activeSec,throughputMbps,goodputMbps,latencyMs,txPackets,rxPackets,lostPackets,retransmissions,lossRatePercent\n";
         }
       csvOut << res.profileName << "," << res.scenarioName << ","
              << res.scheduler << "," << paths.size () << ","
              << res.totalRxBytes << "," << res.durationSeconds << ","
-             << res.goodputMbps << "," << res.avgLatencyMs << "\n";
+             << res.activeTransferSec << ","
+             << res.throughputMbps << "," << res.goodputMbps << ","
+             << res.avgLatencyMs << ","
+             << res.totalTxPackets << "," << res.totalRxPackets << ","
+             << res.lostPackets << "," << res.retransmissions << ","
+             << res.packetLossRate << "\n";
       csvOut.close ();
     }
 

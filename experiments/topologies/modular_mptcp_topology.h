@@ -6,6 +6,7 @@
 #include "ns3/internet-module.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
 #include "ns3/error-model.h"
 #include "ns3/mptcp-scheduler-blest.h"
 #include "ns3/mptcp-scheduler-ecf.h"
@@ -25,9 +26,17 @@ struct TopologyResult
   std::string profileName;
   std::string scenarioName;
   uint64_t totalRxBytes;
+  uint64_t totalTxBytes;
+  uint32_t totalTxPackets;
+  uint32_t totalRxPackets;
+  uint32_t lostPackets;
+  uint32_t retransmissions;
   double durationSeconds;
+  double activeTransferSec;
+  double throughputMbps;
   double goodputMbps;
   double avgLatencyMs;
+  double packetLossRate;
 };
 
 class ModularMptcpTopology
@@ -152,41 +161,95 @@ public:
         DynamicController::ScheduleScenario (m_dynamicScenario, devices[0], devices[1], 2.0);
       }
 
+    // Install FlowMonitor to measure real packet transmission, lost packets, and latency
+    FlowMonitorHelper flowmon;
+    Ptr<FlowMonitor> monitor = flowmon.InstallAll ();
+
     Simulator::Stop (Seconds (m_simDuration));
     Simulator::Run ();
 
-    Ptr<PacketSink> sink = DynamicCast<PacketSink> (sinkApp.Get (0));
-    uint64_t totalBytes = sink ? sink->GetTotalRx () : 0;
-    double activeTime = m_appStopTime - m_appStartTime;
-    double goodput = (totalBytes * 8.0) / (activeTime * 1e6);
+    monitor->CheckForLostPackets ();
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+    std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats ();
 
-    // Approximate average RTT / delay estimation based on active path propagation delay
-    double avgLatency = 0.0;
-    if (!m_paths.empty ())
+    uint64_t totalTxBytes = 0;
+    uint64_t totalRxBytes = 0;
+    uint32_t totalTxPackets = 0;
+    uint32_t totalRxPackets = 0;
+    uint32_t totalLostPackets = 0;
+    double totalDelaySec = 0.0;
+    uint64_t rxDelayCount = 0;
+    Time firstRxTime = Seconds (999999.0);
+    Time lastRxTime = Seconds (0.0);
+
+    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator it = stats.begin (); it != stats.end (); ++it)
       {
-        double sumDelays = 0.0;
-        for (size_t i = 0; i < m_paths.size (); ++i)
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (it->first);
+        if (t.destinationPort == port)
           {
-            // Parse delay string roughly (e.g. "15ms", "65ms")
-            std::string d = m_paths[i].delay;
-            double ms = 20.0;
-            if (d.find ("ms") != std::string::npos)
+            totalTxBytes += it->second.txBytes;
+            totalRxBytes += it->second.rxBytes;
+            totalTxPackets += it->second.txPackets;
+            totalRxPackets += it->second.rxPackets;
+            totalLostPackets += it->second.lostPackets;
+            totalDelaySec += it->second.delaySum.GetSeconds ();
+            rxDelayCount += it->second.rxPackets;
+
+            if (it->second.rxPackets > 0)
               {
-                ms = std::atof (d.substr (0, d.find ("ms")).c_str ());
+                if (it->second.timeFirstRxPacket < firstRxTime)
+                  {
+                    firstRxTime = it->second.timeFirstRxPacket;
+                  }
+                if (it->second.timeLastRxPacket > lastRxTime)
+                  {
+                    lastRxTime = it->second.timeLastRxPacket;
+                  }
               }
-            sumDelays += ms * 2.0; // Two-way RTT
           }
-        avgLatency = sumDelays / m_paths.size ();
       }
+
+    Ptr<PacketSink> sink = DynamicCast<PacketSink> (sinkApp.Get (0));
+    uint64_t sinkRxBytes = sink ? sink->GetTotalRx () : 0;
+    double activeTime = m_appStopTime - m_appStartTime;
+    double transferDuration = activeTime;
+    if (lastRxTime > firstRxTime)
+      {
+        transferDuration = (lastRxTime - firstRxTime).GetSeconds ();
+      }
+    if (transferDuration <= 0.001)
+      {
+        transferDuration = activeTime;
+      }
+
+    double throughput = (totalRxBytes > 0) ? (totalRxBytes * 8.0) / (transferDuration * 1e6) : 0.0;
+    double goodput = (sinkRxBytes * 8.0) / (activeTime * 1e6);
+
+    double measuredRttMs = 0.0;
+    if (rxDelayCount > 0)
+      {
+        // 2-way RTT estimate from one-way packet latency + queueing
+        measuredRttMs = (totalDelaySec / (double)rxDelayCount) * 1000.0 * 2.0;
+      }
+
+    double lossRate = (totalTxPackets > 0) ? (totalLostPackets * 100.0 / (double)totalTxPackets) : 0.0;
 
     Simulator::Destroy ();
 
     TopologyResult res;
     res.scheduler = m_enableMptcp ? m_schedulerType : "Standard-TCP";
-    res.totalRxBytes = totalBytes;
+    res.totalRxBytes = sinkRxBytes;
+    res.totalTxBytes = totalTxBytes;
+    res.totalTxPackets = totalTxPackets;
+    res.totalRxPackets = totalRxPackets;
+    res.lostPackets = totalLostPackets;
+    res.retransmissions = totalLostPackets;
     res.durationSeconds = activeTime;
+    res.activeTransferSec = transferDuration;
+    res.throughputMbps = throughput;
     res.goodputMbps = goodput;
-    res.avgLatencyMs = avgLatency;
+    res.avgLatencyMs = measuredRttMs;
+    res.packetLossRate = lossRate;
     return res;
   }
 
