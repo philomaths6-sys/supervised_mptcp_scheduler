@@ -15,28 +15,35 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 
 # Full matrix of schedulers comparing Standard-TCP, minRTT, RoundRobin, BLEST, and ECF
 TEST_MATRIX = [
-    # 1. Static Profile: Wi-Fi + Cellular (Smartphone)
+    # 0. Canonical Asymmetric Benchmark: Ethernet 5 Mbps + Wi-Fi 1 Mbps (Research Baseline)
+    {"profile": "custom", "scenario": "none", "scheduler": "Standard-TCP", "mptcp": False},
+    {"profile": "custom", "scenario": "none", "scheduler": "FastestRTT", "mptcp": True},
+    {"profile": "custom", "scenario": "none", "scheduler": "RoundRobin", "mptcp": True},
+    {"profile": "custom", "scenario": "none", "scheduler": "BLEST", "mptcp": True},
+    {"profile": "custom", "scenario": "none", "scheduler": "ECF", "mptcp": True},
+
+    # 1. Static Profile: Wi-Fi (15 Mbps) + Cellular (5 Mbps)
     {"profile": "wifi_cellular", "scenario": "none", "scheduler": "Standard-TCP", "mptcp": False},
     {"profile": "wifi_cellular", "scenario": "none", "scheduler": "FastestRTT", "mptcp": True},
     {"profile": "wifi_cellular", "scenario": "none", "scheduler": "RoundRobin", "mptcp": True},
     {"profile": "wifi_cellular", "scenario": "none", "scheduler": "BLEST", "mptcp": True},
     {"profile": "wifi_cellular", "scenario": "none", "scheduler": "ECF", "mptcp": True},
 
-    # 2. Static Profile: Ethernet + Wi-Fi (Workstation)
+    # 2. Static Profile: Ethernet (25 Mbps) + Wi-Fi (10 Mbps)
     {"profile": "ethernet_wifi", "scenario": "none", "scheduler": "Standard-TCP", "mptcp": False},
     {"profile": "ethernet_wifi", "scenario": "none", "scheduler": "FastestRTT", "mptcp": True},
     {"profile": "ethernet_wifi", "scenario": "none", "scheduler": "RoundRobin", "mptcp": True},
     {"profile": "ethernet_wifi", "scenario": "none", "scheduler": "BLEST", "mptcp": True},
     {"profile": "ethernet_wifi", "scenario": "none", "scheduler": "ECF", "mptcp": True},
 
-    # 3. Static Profile: Triple-Path (Ethernet + Wi-Fi + Cellular)
+    # 3. Static Profile: Triple-Path (Ethernet 20 Mbps + Wi-Fi 10 Mbps + Cellular 5 Mbps)
     {"profile": "triple_path", "scenario": "none", "scheduler": "Standard-TCP", "mptcp": False},
     {"profile": "triple_path", "scenario": "none", "scheduler": "FastestRTT", "mptcp": True},
     {"profile": "triple_path", "scenario": "none", "scheduler": "RoundRobin", "mptcp": True},
     {"profile": "triple_path", "scenario": "none", "scheduler": "BLEST", "mptcp": True},
     {"profile": "triple_path", "scenario": "none", "scheduler": "ECF", "mptcp": True},
 
-    # 4. Dynamic Generalization: Fading & Mobile Handover (Objective iii)
+    # 4. Dynamic Generalization: Fading & Mobile Handover
     {"profile": "wifi_cellular", "scenario": "fading_handover", "scheduler": "Standard-TCP", "mptcp": False},
     {"profile": "wifi_cellular", "scenario": "fading_handover", "scheduler": "FastestRTT", "mptcp": True},
     {"profile": "wifi_cellular", "scenario": "fading_handover", "scheduler": "RoundRobin", "mptcp": True},
@@ -62,12 +69,12 @@ def run_simulation(cfg):
         f'--scheduler={sched} '
         f'--mptcp={mptcp_flag} '
         f'--duration=5.0 '
-        f'--transferBytes=8000000 '
+        f'--transferBytes=0 '
         f'--outputCsv={CSV_PATH}"'
     )
     print(f"\n[RUNNING] Profile: {cfg['profile']} | Scenario: {cfg['scenario']} | Protocol: {cfg['scheduler']}")
     try:
-        proc = subprocess.run(cmd, cwd=NS3_DIR, shell=True, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, cwd=NS3_DIR, shell=True, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             print(f"[ERROR] Simulation failed with code {proc.returncode}:\n{proc.stderr}")
         else:

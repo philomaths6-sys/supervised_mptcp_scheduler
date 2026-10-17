@@ -29,6 +29,7 @@
 #include "ns3/mptcp-scheduler-round-robin.h"
 #include <vector>
 #include <list>
+#include <map>
 
 namespace ns3
 {
@@ -70,6 +71,7 @@ public:
 protected:
   uint8_t  m_lastUsedFlowId;        //!< keep track of last used subflow
   Ptr<MpTcpSocketBase> m_metaSock;  //!<
+  std::map<int, int> m_deficits;
 };
 
 } // end of 'ns3'

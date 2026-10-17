@@ -28,6 +28,7 @@
 #include "ns3/mptcp-scheduler-fastest-rtt.h"
 #include <vector>
 #include <list>
+#include <map>
 
 namespace ns3
 {
@@ -62,7 +63,7 @@ public:
   /**
    * \return -1 if could not find a valid subflow, the subflow id otherwise
    */
-  virtual int FindFastestSubflowWithFreeWindow() const;
+  virtual int FindFastestSubflowWithFreeWindow();
 
   /**
    * \return Index of subflow to use
@@ -70,9 +71,12 @@ public:
   virtual Ptr<MpTcpSubflow> GetSubflowToUseForEmptyPacket();
 
 protected:
+  double EstimateRate(int subflowId);
+
   Ptr<MpTcpSocketBase> m_metaSock;  //!<
+  std::map<int, double> m_virtualQueuedBytes;
 };
 
 } // end of 'ns3'
 
-#endif /* MPTCP_SCHEDULER_ROUND_ROBIN_H */
+#endif /* MPTCP_SCHEDULER_FASTEST_RTT_H */

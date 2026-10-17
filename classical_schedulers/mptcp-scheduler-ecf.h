@@ -6,6 +6,7 @@
 #include "ns3/ptr.h"
 #include "ns3/nstime.h"
 #include <vector>
+#include <map>
 
 namespace ns3
 {
@@ -36,6 +37,9 @@ protected:
   double EstimateCompletionTime(int subflowId);
 
   Ptr<MpTcpSocketBase> m_metaSock;
+  std::map<int, double> m_virtualQueuedBytes;
+  std::map<int, Time> m_lastUpdateTime;
+  double EstimateRate(int subflowId);
 };
 
 } // namespace ns3

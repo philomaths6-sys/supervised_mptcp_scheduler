@@ -24,6 +24,9 @@
 #include "ns3/mptcp-scheduler-round-robin.h"
 #include "ns3/mptcp-subflow.h"
 #include "ns3/mptcp-socket-base.h"
+#include "ns3/data-rate.h"
+#include "ns3/node.h"
+#include "ns3/net-device.h"
 #include "ns3/log.h"
 
 NS_LOG_COMPONENT_DEFINE("MpTcpSchedulerRoundRobin");
@@ -78,7 +81,7 @@ MpTcpSchedulerRoundRobin::GetSubflowToUseForEmptyPacket()
   return m_metaSock->GetSubflow(0);
 }
 
-/* We assume scheduler can't send data on subflows, so it can just generate mappings */
+/* Capacity-Proportional Deficit Round-Robin (CP-DRR) Scheduler */
 bool
 MpTcpSchedulerRoundRobin::GenerateMapping(int& activeSubflowArrayId, SequenceNumber64& dsn, uint16_t& length)
 {
@@ -88,49 +91,116 @@ MpTcpSchedulerRoundRobin::GenerateMapping(int& activeSubflowArrayId, SequenceNum
   int nbOfSubflows = m_metaSock->GetNActiveSubflows();
   if (nbOfSubflows <= 0) return false;
 
-  int attempt = 0;
-  uint32_t amountOfDataToSend = 0;
-
-  //! Tx data not sent to subflows yet
   SequenceNumber32 metaNextTxSeq = m_metaSock->Getvalue_nextTxSeq(); 
-  amountOfDataToSend = m_metaSock->m_txBuffer->SizeFromSequence( metaNextTxSeq );
+  uint32_t amountOfDataToSend = m_metaSock->m_txBuffer->SizeFromSequence( metaNextTxSeq );
   uint32_t metaWindow = m_metaSock->AvailableWindow();
 
-  if(amountOfDataToSend <= 0)
-   {
-     NS_LOG_DEBUG("Nothing to send from meta");
-     return false;
-   }
+  if (amountOfDataToSend <= 0 || metaWindow <= 0)
+    {
+      return false;
+    }
 
-  if(metaWindow <= 0)
-   {
-     NS_LOG_DEBUG("No meta window available (TODO should be in persist state ?)");
-     return false;
-   }
-  while(attempt < nbOfSubflows)
-     {
-       attempt++;
-       m_lastUsedFlowId = (m_lastUsedFlowId + 1) % nbOfSubflows;
-       Ptr<MpTcpSubflow> subflow = m_metaSock->GetSubflow(m_lastUsedFlowId);
-       if (!subflow)
-         {
-           continue;
-         }
-       uint32_t subflowWindow = subflow->AvailableWindow();
-       uint32_t canSend = std::min( subflowWindow, metaWindow);
-
-       //! Can't send more than SegSize
-       //metaWindow en fait on s'en fout du SegSize ?
-       if(canSend > 0)
+  // 1. Probe uninitialized subflows first so they get an RTT sample immediately
+  for (int i = 0; i < nbOfSubflows; ++i)
+    {
+      Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
+      if (sf && sf->AvailableWindow() > 0 && sf->m_tcb->m_lastRtt.Get() == Seconds(0.0))
         {
-          activeSubflowArrayId = m_lastUsedFlowId;
+          activeSubflowArrayId = i;
           dsn = SEQ32TO64(metaNextTxSeq);
+          uint32_t canSend = std::min((uint32_t)sf->AvailableWindow(), metaWindow);
           canSend = std::min(canSend, amountOfDataToSend);
-          // For now we limit ourselves to a per packet basis
-          length = std::min(canSend, subflow->GetSegSize());
+          length = std::min(canSend, (uint32_t)sf->GetSegSize());
           return true;
         }
-     }
+    }
+
+  // 2. Compute dynamic subflow rates and weights
+  std::vector<double> rates(nbOfSubflows, 1.0);
+  double minRate = 1e12;
+  for (int i = 0; i < nbOfSubflows; ++i)
+    {
+      Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
+      if (sf)
+        {
+          double rate = 500000.0;
+          Ptr<Node> node = sf->GetNode ();
+          if (node && (uint32_t)i < node->GetNDevices ())
+            {
+              Ptr<NetDevice> dev = node->GetDevice (i);
+              DataRateValue dv;
+              if (dev && dev->GetAttributeFailSafe ("DataRate", dv))
+                {
+                  double physicalRate = dv.Get ().GetBitRate () / 8.0;
+                  rate = std::max (10000.0, physicalRate);
+                }
+            }
+          rates[i] = rate;
+          if (rates[i] < minRate) minRate = rates[i];
+        }
+    }
+  if (minRate <= 0.0) minRate = 1.0;
+
+  // Replenish deficits if all active subflow deficits are <= 0
+  bool anyDeficitPositive = false;
+  for (int i = 0; i < nbOfSubflows; ++i)
+    {
+      Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
+      if (sf && sf->AvailableWindow() > 0 && m_deficits[i] > 0)
+        {
+          anyDeficitPositive = true;
+          break;
+        }
+    }
+
+  if (!anyDeficitPositive)
+    {
+      for (int i = 0; i < nbOfSubflows; ++i)
+        {
+          int weight = std::max(1, (int)std::round(rates[i] / minRate));
+          if (weight > 20) weight = 20;
+          m_deficits[i] = weight;
+        }
+    }
+
+  // 3. Find subflow with deficit > 0 and available window
+  int selectedId = -1;
+  for (int attempt = 0; attempt < nbOfSubflows; ++attempt)
+    {
+      int fid = (m_lastUsedFlowId + attempt) % nbOfSubflows;
+      Ptr<MpTcpSubflow> subflow = m_metaSock->GetSubflow(fid);
+      if (subflow && subflow->AvailableWindow() > 0 && m_deficits[fid] > 0)
+        {
+          selectedId = fid;
+          break;
+        }
+    }
+
+  if (selectedId < 0)
+    {
+      return false; // Wait for subflow window to open to preserve bandwidth-proportional pacing
+    }
+
+  if (selectedId >= 0)
+    {
+      Ptr<MpTcpSubflow> subflow = m_metaSock->GetSubflow(selectedId);
+      uint32_t subflowWindow = subflow->AvailableWindow();
+      uint32_t canSend = std::min(subflowWindow, metaWindow);
+      if (canSend > 0)
+        {
+          activeSubflowArrayId = selectedId;
+          dsn = SEQ32TO64(metaNextTxSeq);
+          canSend = std::min(canSend, amountOfDataToSend);
+          length = std::min(canSend, (uint32_t)subflow->GetSegSize());
+          m_deficits[selectedId]--;
+          if (m_deficits[selectedId] <= 0)
+            {
+              m_lastUsedFlowId = (selectedId + 1) % nbOfSubflows;
+            }
+          return true;
+        }
+    }
+
   return false;
 }
 

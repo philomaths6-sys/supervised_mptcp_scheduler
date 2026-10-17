@@ -37,33 +37,33 @@ public:
     switch (type)
       {
       case PROFILE_WIFI_CELLULAR:
-        // Path 0: Wi-Fi (802.11ac)
-        paths.push_back (PathConfig ("WiFi", "50Mbps", "15ms", 0.002, 60));
-        // Path 1: Cellular (4G LTE / 5G)
-        paths.push_back (PathConfig ("Cellular", "20Mbps", "65ms", 0.008, 40));
+        // Path 0: Wi-Fi (15 Mbps, 15ms, 0.1% loss, 300 pkts buffer)
+        paths.push_back (PathConfig ("WiFi", "15Mbps", "15ms", 0.001, 300));
+        // Path 1: Cellular 4G LTE (5 Mbps, 50ms, 0.3% loss, 200 pkts buffer)
+        paths.push_back (PathConfig ("Cellular", "5Mbps", "50ms", 0.003, 200));
         break;
 
       case PROFILE_ETHERNET_WIFI:
-        // Path 0: Fast Ethernet
-        paths.push_back (PathConfig ("Ethernet", "100Mbps", "5ms", 0.0, 100));
-        // Path 1: Wi-Fi
-        paths.push_back (PathConfig ("WiFi", "35Mbps", "25ms", 0.003, 50));
+        // Path 0: Ethernet (25 Mbps, 5ms, 0 loss, 400 pkts buffer)
+        paths.push_back (PathConfig ("Ethernet", "25Mbps", "5ms", 0.0, 400));
+        // Path 1: Wi-Fi (10 Mbps, 25ms, 0.2% loss, 250 pkts buffer)
+        paths.push_back (PathConfig ("WiFi", "10Mbps", "25ms", 0.002, 250));
         break;
 
       case PROFILE_TRIPLE_PATH:
-        // Path 0: Ethernet
-        paths.push_back (PathConfig ("Ethernet", "100Mbps", "5ms", 0.0, 100));
-        // Path 1: Wi-Fi
-        paths.push_back (PathConfig ("WiFi", "40Mbps", "25ms", 0.005, 60));
-        // Path 2: Cellular
-        paths.push_back (PathConfig ("Cellular", "15Mbps", "80ms", 0.01, 40));
+        // Path 0: Ethernet (20 Mbps, 5ms, 0 loss, 350 pkts buffer)
+        paths.push_back (PathConfig ("Ethernet", "20Mbps", "5ms", 0.0, 350));
+        // Path 1: Wi-Fi (10 Mbps, 25ms, 0.2% loss, 250 pkts buffer)
+        paths.push_back (PathConfig ("WiFi", "10Mbps", "25ms", 0.002, 250));
+        // Path 2: Cellular (5 Mbps, 60ms, 0.5% loss, 200 pkts buffer)
+        paths.push_back (PathConfig ("Cellular", "5Mbps", "60ms", 0.005, 200));
         break;
 
       case PROFILE_CUSTOM:
       default:
-        // Default dual-path
-        paths.push_back (PathConfig ("Path0", "20Mbps", "10ms", 0.0, 100));
-        paths.push_back (PathConfig ("Path1", "10Mbps", "50ms", 0.0, 100));
+        // Canonical Research Ratio: Ethernet 5Mbps + WiFi 1Mbps
+        paths.push_back (PathConfig ("Path0", "5Mbps", "10ms", 0.0, 250));
+        paths.push_back (PathConfig ("Path1", "1Mbps", "30ms", 0.0, 150));
         break;
       }
     return paths;

@@ -23,6 +23,9 @@
 #include "ns3/mptcp-scheduler-fastest-rtt.h"
 #include "ns3/mptcp-subflow.h"
 #include "ns3/mptcp-socket-base.h"
+#include "ns3/data-rate.h"
+#include "ns3/node.h"
+#include "ns3/net-device.h"
 #include "ns3/log.h"
 
 NS_LOG_COMPONENT_DEFINE("MpTcpSchedulerFastestRTT");
@@ -67,27 +70,66 @@ MpTcpSchedulerFastestRTT::SetMeta(Ptr<MpTcpSocketBase> metaSock)
   m_metaSock = metaSock;
 }
 
+double
+MpTcpSchedulerFastestRTT::EstimateRate (int subflowId)
+{
+  Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow (subflowId);
+  if (!sf) return 500000.0;
+
+  Ptr<Node> node = sf->GetNode ();
+  if (node && (uint32_t)subflowId < node->GetNDevices ())
+    {
+      Ptr<NetDevice> dev = node->GetDevice (subflowId);
+      DataRateValue dv;
+      if (dev && dev->GetAttributeFailSafe ("DataRate", dv))
+        {
+          double physicalRate = dv.Get ().GetBitRate () / 8.0;
+          return std::max (10000.0, physicalRate);
+        }
+    }
+
+  double rttSec = sf->m_rtt->GetEstimate ().GetSeconds ();
+  if (rttSec <= 0.001) rttSec = 0.01;
+  uint32_t cwnd = sf->m_tcb->m_cWnd.Get ();
+  if (cwnd == 0) cwnd = sf->GetSegSize ();
+  return std::max (10000.0, (double)cwnd / rttSec);
+}
+
 int
-MpTcpSchedulerFastestRTT::FindFastestSubflowWithFreeWindow() const
+MpTcpSchedulerFastestRTT::FindFastestSubflowWithFreeWindow()
 {
   NS_LOG_FUNCTION_NOARGS();
-  int id = -1;
+  int nSubflows = m_metaSock->GetNActiveSubflows();
+  if (nSubflows <= 0) return -1;
 
-  Time lowestEstimate = Time::Max();
-  for (int i = 0; i < (int) m_metaSock->GetNActiveSubflows() ; i++ )
+  // 1. Probe uninitialized subflows first so they get an initial RTT estimate
+  for (int i = 0; i < nSubflows; ++i)
     {
       Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
-      if(sf->AvailableWindow() <= 0)
-      {
-        continue;
-      }
-      if(sf->m_rtt->GetEstimate () < lowestEstimate)
-      {
-        lowestEstimate = sf->m_rtt->GetEstimate ();
-        id = i;
-      }
-   }
-  return id;
+      if (sf && sf->AvailableWindow() > 0 && sf->m_tcb->m_lastRtt.Get() == Seconds(0.0))
+        {
+          return i;
+        }
+    }
+
+  // 2. Classical minRTT: Select subflow with lowest smoothed RTT among those with free window
+  int bestId = -1;
+  Time minRtt = Time::Max ();
+
+  for (int i = 0; i < nSubflows; ++i)
+    {
+      Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
+      if (!sf || sf->AvailableWindow() == 0) continue;
+
+      Time rtt = sf->m_rtt->GetEstimate ();
+      if (rtt < minRtt)
+        {
+          minRtt = rtt;
+          bestId = i;
+        }
+    }
+
+  return bestId;
 }
 
 Ptr<MpTcpSubflow>
@@ -103,31 +145,14 @@ MpTcpSchedulerFastestRTT::GenerateMapping(int& activeSubflowArrayId, SequenceNum
   NS_LOG_FUNCTION(this);
   NS_ASSERT(m_metaSock);
 
-  static int debugCount = 0;
-  if (debugCount++ < 10)
-    {
-      std::cout << "[SCHEDULER DEBUG] nActiveSubflows=" << m_metaSock->GetNActiveSubflows() << std::endl;
-      for (int i = 0; i < (int)m_metaSock->GetNActiveSubflows(); ++i)
-        {
-          Ptr<MpTcpSubflow> sf = m_metaSock->GetSubflow(i);
-          std::cout << "  Subflow " << i << ": rtt=" << sf->m_rtt->GetEstimate().GetMilliSeconds()
-                    << "ms, cWnd=" << sf->m_tcb->m_cWnd << ", availWnd=" << sf->AvailableWindow() << std::endl;
-        }
-    }
-
   uint32_t amountOfDataToSend = 0;
   //! Tx data not sent to subflows yet
   SequenceNumber32 metaNextTxSeq = m_metaSock->Getvalue_nextTxSeq();
   amountOfDataToSend = m_metaSock->m_txBuffer->SizeFromSequence( metaNextTxSeq );
   uint32_t metaWindow = m_metaSock->AvailableWindow();
-  if (amountOfDataToSend <= 0)
+  if (amountOfDataToSend <= 0 || metaWindow <= 0)
     {
-      NS_LOG_DEBUG("Nothing to send from meta");
       return false;
-    }
-  if (metaWindow <= 0)
-   {
-     return false;
     }
 
   int id = FindFastestSubflowWithFreeWindow();
@@ -140,15 +165,12 @@ MpTcpSchedulerFastestRTT::GenerateMapping(int& activeSubflowArrayId, SequenceNum
   uint32_t subflowWindow = subflow->AvailableWindow();
   uint32_t canSend = std::min( subflowWindow, metaWindow);
 
-  //! Can't send more than SegSize
-  //metaWindow en fait on s'en fout du SegSize ?
   if (canSend > 0)
     {
       activeSubflowArrayId = id;
       dsn = SEQ32TO64(metaNextTxSeq);
       canSend = std::min(canSend, amountOfDataToSend);
-      // For now we limit ourselves to a per packet basis
-      length = std::min(canSend, subflow->GetSegSize());
+      length = std::min(canSend, (uint32_t)subflow->GetSegSize());
       return true;
     }
   return false;

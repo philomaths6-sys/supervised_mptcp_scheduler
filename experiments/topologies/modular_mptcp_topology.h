@@ -67,9 +67,12 @@ public:
     Config::SetDefault ("ns3::TcpSocketBase::EnableMpTcp", BooleanValue (m_enableMptcp));
     Config::SetDefault ("ns3::MpTcpSocketBase::PathManagerMode", EnumValue (MpTcpSocketBase::FullMesh));
 
-    // Increase TCP Send and Receive Buffers to allow Bandwidth-Delay Product (BDP) aggregation
+    // 1 MB buffer for high Bandwidth-Delay Product aggregation across diverse delay paths
     Config::SetDefault ("ns3::TcpSocket::RcvBufSize", UintegerValue (1048576)); // 1 MB
     Config::SetDefault ("ns3::TcpSocket::SndBufSize", UintegerValue (1048576)); // 1 MB
+    Config::SetDefault ("ns3::TcpSocket::InitialCwnd", UintegerValue (10));     // RFC 6928 / Linux default (10 MSS)
+    Config::SetDefault ("ns3::TcpSocketBase::WindowScaling", BooleanValue (true));
+    Config::SetDefault ("ns3::TcpSocketBase::Sack", BooleanValue (true));
 
     if (m_enableMptcp)
       {
@@ -156,6 +159,7 @@ public:
 
     // Install BulkSend Application on Client (Node 0)
     BulkSendHelper sourceHelper ("ns3::TcpSocketFactory", InetSocketAddress (sinkAddress, port));
+    sourceHelper.SetAttribute ("SendSize", UintegerValue (536));
     if (m_transferSize > 0)
       {
         sourceHelper.SetAttribute ("MaxBytes", UintegerValue (m_transferSize));
@@ -236,7 +240,8 @@ public:
       }
 
     double throughput = (totalRxBytes > 0) ? (totalRxBytes * 8.0) / (transferDuration * 1e6) : 0.0;
-    double goodput = (sinkRxBytes * 8.0) / (activeTime * 1e6);
+    double effectiveTime = (m_transferSize > 0 && transferDuration > 0.05) ? transferDuration : activeTime;
+    double goodput = (sinkRxBytes * 8.0) / (effectiveTime * 1e6);
 
     double measuredRttMs = 0.0;
     if (rxDelayCount > 0)

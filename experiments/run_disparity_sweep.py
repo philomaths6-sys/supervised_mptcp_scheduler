@@ -48,7 +48,7 @@ def run_point(p1_delay, ratio, sched_cfg):
         f'--scheduler={sched_name} '
         f'--mptcp={mptcp_flag} '
         f'--duration=5.0 '
-        f'--transferBytes=12000000 '
+        f'--transferBytes=0 '
         f'--outputCsv={CSV_PATH}"'
     )
     print(f"[RUNNING SWEEP] Disparity: {ratio}x ({p1_delay}) | Protocol: {label}")

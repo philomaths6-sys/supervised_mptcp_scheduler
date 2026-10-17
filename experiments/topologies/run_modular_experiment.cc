@@ -21,10 +21,10 @@ int main (int argc, char *argv[])
   uint32_t transferBytes = 3000000; // 3 MB
   std::string outputCsv = "";
 
-  // Custom path parameters if profile == "custom"
-  std::string p0Bw = "20Mbps", p0Delay = "10ms";
+  // Custom path parameters if profile == "custom" (Canonical 5 Mbps Ethernet + 1 Mbps WiFi)
+  std::string p0Bw = "5Mbps", p0Delay = "10ms";
   double p0Loss = 0.0;
-  std::string p1Bw = "10Mbps", p1Delay = "50ms";
+  std::string p1Bw = "1Mbps", p1Delay = "30ms";
   double p1Loss = 0.0;
 
   CommandLine cmd;
@@ -62,8 +62,8 @@ int main (int argc, char *argv[])
   std::vector<PathConfig> paths;
   if (profileType == PROFILE_CUSTOM)
     {
-      paths.push_back (PathConfig ("Path0", p0Bw, p0Delay, p0Loss, 100));
-      paths.push_back (PathConfig ("Path1", p1Bw, p1Delay, p1Loss, 100));
+      paths.push_back (PathConfig ("Path0", p0Bw, p0Delay, p0Loss, 250));
+      paths.push_back (PathConfig ("Path1", p1Bw, p1Delay, p1Loss, 150));
     }
   else
     {

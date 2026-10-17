@@ -6,6 +6,7 @@
 #include "ns3/ptr.h"
 #include "ns3/nstime.h"
 #include <vector>
+#include <map>
 
 namespace ns3
 {
@@ -34,8 +35,10 @@ public:
 protected:
   int SelectSubflow();
   bool IsSlowSubflowBlocked(int fastId, int slowId);
+  double EstimateRate(int subflowId);
 
   Ptr<MpTcpSocketBase> m_metaSock;
+  std::map<int, double> m_virtualQueuedBytes;
 };
 
 } // namespace ns3
