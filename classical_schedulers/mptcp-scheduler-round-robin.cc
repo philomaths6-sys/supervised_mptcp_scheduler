@@ -71,8 +71,11 @@ MpTcpSchedulerRoundRobin::SetMeta(Ptr<MpTcpSocketBase> metaSock)
 Ptr<MpTcpSubflow>
 MpTcpSchedulerRoundRobin::GetSubflowToUseForEmptyPacket()
 {
-  NS_ASSERT(m_metaSock->GetNActiveSubflows() > 0 );
-  return  m_metaSock->GetSubflow(0);
+  if (!m_metaSock || m_metaSock->GetNActiveSubflows() == 0)
+    {
+      return 0;
+    }
+  return m_metaSock->GetSubflow(0);
 }
 
 /* We assume scheduler can't send data on subflows, so it can just generate mappings */
@@ -80,9 +83,11 @@ bool
 MpTcpSchedulerRoundRobin::GenerateMapping(int& activeSubflowArrayId, SequenceNumber64& dsn, uint16_t& length)
 {
   NS_LOG_FUNCTION(this);
-  NS_ASSERT(m_metaSock);
+  if (!m_metaSock) return false;
 
   int nbOfSubflows = m_metaSock->GetNActiveSubflows();
+  if (nbOfSubflows <= 0) return false;
+
   int attempt = 0;
   uint32_t amountOfDataToSend = 0;
 
@@ -107,6 +112,10 @@ MpTcpSchedulerRoundRobin::GenerateMapping(int& activeSubflowArrayId, SequenceNum
        attempt++;
        m_lastUsedFlowId = (m_lastUsedFlowId + 1) % nbOfSubflows;
        Ptr<MpTcpSubflow> subflow = m_metaSock->GetSubflow(m_lastUsedFlowId);
+       if (!subflow)
+         {
+           continue;
+         }
        uint32_t subflowWindow = subflow->AvailableWindow();
        uint32_t canSend = std::min( subflowWindow, metaWindow);
 
