@@ -7,6 +7,8 @@
 #include "ns3/point-to-point-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/error-model.h"
+#include "ns3/mptcp-scheduler-blest.h"
+#include "ns3/mptcp-scheduler-ecf.h"
 #include "link_profile.h"
 #include "dynamic_controller.h"
 
@@ -25,6 +27,7 @@ struct TopologyResult
   uint64_t totalRxBytes;
   double durationSeconds;
   double goodputMbps;
+  double avgLatencyMs;
 };
 
 class ModularMptcpTopology
@@ -32,10 +35,12 @@ class ModularMptcpTopology
 public:
   ModularMptcpTopology (std::vector<PathConfig> pathConfigs,
                         std::string scheduler = "FastestRTT",
-                        DynamicScenarioType dynamicScenario = SCENARIO_STATIC)
+                        DynamicScenarioType dynamicScenario = SCENARIO_STATIC,
+                        bool enableMptcp = true)
     : m_paths (pathConfigs),
       m_schedulerType (scheduler),
       m_dynamicScenario (dynamicScenario),
+      m_enableMptcp (enableMptcp),
       m_simDuration (6.0),
       m_appStartTime (0.5),
       m_appStopTime (5.5),
@@ -49,21 +54,32 @@ public:
 
   TopologyResult Run ()
   {
-    // Enable MPTCP
-    Config::SetDefault ("ns3::TcpSocketBase::EnableMpTcp", BooleanValue (true));
+    // Enable or Disable MPTCP
+    Config::SetDefault ("ns3::TcpSocketBase::EnableMpTcp", BooleanValue (m_enableMptcp));
     Config::SetDefault ("ns3::MpTcpSocketBase::PathManagerMode", EnumValue (MpTcpSocketBase::FullMesh));
 
-    if (m_schedulerType == "FastestRTT")
+    if (m_enableMptcp)
       {
-        Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerFastestRTT::GetTypeId ()));
-      }
-    else if (m_schedulerType == "RoundRobin")
-      {
-        Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerRoundRobin::GetTypeId ()));
-      }
-    else
-      {
-        Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerFastestRTT::GetTypeId ()));
+        if (m_schedulerType == "FastestRTT")
+          {
+            Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerFastestRTT::GetTypeId ()));
+          }
+        else if (m_schedulerType == "RoundRobin")
+          {
+            Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerRoundRobin::GetTypeId ()));
+          }
+        else if (m_schedulerType == "BLEST")
+          {
+            Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerBlest::GetTypeId ()));
+          }
+        else if (m_schedulerType == "ECF")
+          {
+            Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerEcf::GetTypeId ()));
+          }
+        else
+          {
+            Config::SetDefault ("ns3::MpTcpSocketBase::Scheduler", TypeIdValue (MpTcpSchedulerFastestRTT::GetTypeId ()));
+          }
       }
 
     // Nodes: Node 0 = Client Sender, Node 1 = Server Receiver
@@ -144,13 +160,33 @@ public:
     double activeTime = m_appStopTime - m_appStartTime;
     double goodput = (totalBytes * 8.0) / (activeTime * 1e6);
 
+    // Approximate average RTT / delay estimation based on active path propagation delay
+    double avgLatency = 0.0;
+    if (!m_paths.empty ())
+      {
+        double sumDelays = 0.0;
+        for (size_t i = 0; i < m_paths.size (); ++i)
+          {
+            // Parse delay string roughly (e.g. "15ms", "65ms")
+            std::string d = m_paths[i].delay;
+            double ms = 20.0;
+            if (d.find ("ms") != std::string::npos)
+              {
+                ms = std::atof (d.substr (0, d.find ("ms")).c_str ());
+              }
+            sumDelays += ms * 2.0; // Two-way RTT
+          }
+        avgLatency = sumDelays / m_paths.size ();
+      }
+
     Simulator::Destroy ();
 
     TopologyResult res;
-    res.scheduler = m_schedulerType;
+    res.scheduler = m_enableMptcp ? m_schedulerType : "Standard-TCP";
     res.totalRxBytes = totalBytes;
     res.durationSeconds = activeTime;
     res.goodputMbps = goodput;
+    res.avgLatencyMs = avgLatency;
     return res;
   }
 
@@ -158,6 +194,7 @@ private:
   std::vector<PathConfig> m_paths;
   std::string m_schedulerType;
   DynamicScenarioType m_dynamicScenario;
+  bool m_enableMptcp;
   double m_simDuration;
   double m_appStartTime;
   double m_appStopTime;

@@ -16,6 +16,7 @@ int main (int argc, char *argv[])
   std::string profileStr = "wifi_cellular"; // wifi_cellular, ethernet_wifi, triple_path, custom
   std::string dynamicScenarioStr = "none";  // none, bufferbloat, fading_handover, outage
   std::string schedulerStr = "FastestRTT";  // FastestRTT, RoundRobin, BLEST, ECF, SupervisedML
+  bool enableMptcp = true;
   double duration = 5.0;
   uint32_t transferBytes = 3000000; // 3 MB
   std::string outputCsv = "";
@@ -30,6 +31,7 @@ int main (int argc, char *argv[])
   cmd.AddValue ("profile", "Device profile: wifi_cellular, ethernet_wifi, triple_path, custom", profileStr);
   cmd.AddValue ("scenario", "Dynamic scenario: none, bufferbloat, fading_handover, outage", dynamicScenarioStr);
   cmd.AddValue ("scheduler", "Scheduler: FastestRTT, RoundRobin, BLEST, ECF, SupervisedML", schedulerStr);
+  cmd.AddValue ("mptcp", "Enable MPTCP (true for MPTCP, false for Standard-TCP)", enableMptcp);
   cmd.AddValue ("duration", "Simulation duration in seconds", duration);
   cmd.AddValue ("transferBytes", "Total transfer bytes (0 for continuous)", transferBytes);
   cmd.AddValue ("outputCsv", "Output CSV filepath", outputCsv);
@@ -83,7 +85,7 @@ int main (int argc, char *argv[])
       scenarioType = SCENARIO_OUTAGE_RECOVERY;
     }
 
-  ModularMptcpTopology topology (paths, schedulerStr, scenarioType);
+  ModularMptcpTopology topology (paths, schedulerStr, scenarioType, enableMptcp);
   topology.SetSimulationDuration (duration);
   topology.SetAppTime (0.5, duration - 0.5);
   topology.SetTransferSize (transferBytes);
@@ -103,11 +105,12 @@ int main (int argc, char *argv[])
                 << ", Loss: " << (paths[i].lossRate * 100) << "%\n";
     }
   std::cout << "Dynamic Scenario        : " << res.scenarioName << "\n";
-  std::cout << "Scheduler               : " << res.scheduler << "\n";
+  std::cout << "Protocol / Scheduler    : " << res.scheduler << "\n";
   std::cout << "Duration Active         : " << res.durationSeconds << " s\n";
   std::cout << "Total Data Transferred  : " << res.totalRxBytes << " bytes ("
             << (res.totalRxBytes / 1024.0 / 1024.0) << " MB)\n";
   std::cout << "Effective Goodput       : " << res.goodputMbps << " Mbps\n";
+  std::cout << "Est Avg Latency (RTT)   : " << res.avgLatencyMs << " ms\n";
   std::cout << "======================================================\n\n";
 
   if (!outputCsv.empty ())
@@ -123,12 +126,12 @@ int main (int argc, char *argv[])
       std::ofstream csvOut (outputCsv.c_str (), std::ios::app);
       if (writeHeader)
         {
-          csvOut << "profile,scenario,scheduler,numPaths,totalRxBytes,durationSec,goodputMbps\n";
+          csvOut << "profile,scenario,scheduler,numPaths,totalRxBytes,durationSec,goodputMbps,latencyMs\n";
         }
       csvOut << res.profileName << "," << res.scenarioName << ","
              << res.scheduler << "," << paths.size () << ","
              << res.totalRxBytes << "," << res.durationSeconds << ","
-             << res.goodputMbps << "\n";
+             << res.goodputMbps << "," << res.avgLatencyMs << "\n";
       csvOut.close ();
     }
 
