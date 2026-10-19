@@ -1,79 +1,90 @@
 /* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
-/*
- * Copyright (c) 2015 University of Sussex
- * Copyright (c) 2015 Université Pierre et Marie Curie (UPMC)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation;
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- * Author:  Kashif Nadeem <kshfnadeem@gmail.com>
- *          Matthieu Coudron <matthieu.coudron@lip6.fr>
- *          Morteza Kheirkhah <m.kheirkhah@sussex.ac.uk>
- */
 #ifndef MPTCP_SCHEDULER_ROUND_ROBIN_H
 #define MPTCP_SCHEDULER_ROUND_ROBIN_H
 
-#include "ns3/mptcp-scheduler.h"
-#include "ns3/object.h"
-#include "ns3/ptr.h"
-#include "ns3/mptcp-scheduler-round-robin.h"
-#include <vector>
-#include <list>
-#include <map>
+#include "telemetry_scheduler.h"
 
-namespace ns3
+namespace ns3 {
+
+/**
+ * \brief MpTcpSchedulerRoundRobin
+ * Canonical Round-Robin MPTCP scheduler built on public APIs with Silly Window Syndrome prevention.
+ */
+class MpTcpSchedulerRoundRobin : public TelemetryScheduler
 {
-
-class MpTcpSocketBase;
-class MpTcpSubflow;
-
-class MpTcpSchedulerRoundRobin : public MpTcpScheduler
-{
-
 public:
-  static TypeId
-  GetTypeId (void);
+  static TypeId GetTypeId (void)
+  {
+    static TypeId tid = TypeId ("ns3::MpTcpSchedulerRoundRobin")
+      .SetParent<MpTcpScheduler> ()
+      .AddConstructor<MpTcpSchedulerRoundRobin> ();
+    return tid;
+  }
 
-  MpTcpSchedulerRoundRobin();
-  virtual ~MpTcpSchedulerRoundRobin ();
-  void SetMeta(Ptr<MpTcpSocketBase> metaSock);
+  MpTcpSchedulerRoundRobin ()
+    : TelemetryScheduler (),
+      m_lastIdx (-1)
+  {}
 
-  /**
-   * \brief This function is responsible for generating a list of packets to send
-   * and to specify on which subflow to send.
-   *
-   * These *mappings* will be passed on to the meta socket that will send them without altering the
-   * mappings.
-   * It is of utmost importance to generate a perfect mapping !!! Any deviation
-   * from the foreseen mapping will trigger an error and crash the simulator
-   *
-   *  \warn This function MUST NOT fiddle with metasockInternal
-   * subflowId: pair(start,size)
-   */
-  virtual bool GenerateMapping(int& activeSubflowArrayId, SequenceNumber64& dsn, uint16_t& length);
+  virtual ~MpTcpSchedulerRoundRobin () {}
 
-  /**
-   * \brief chooseSubflowForRetransmit
-   * \return Index of subflow to use
-   */
-  virtual Ptr<MpTcpSubflow> GetSubflowToUseForEmptyPacket();
+  virtual bool GenerateMapping (int& activeSubflowArrayId, SequenceNumber64& dsn, uint16_t& length)
+  {
+    if (!m_meta || m_meta->GetNActiveSubflows () == 0)
+      {
+        return false;
+      }
 
-protected:
-  uint8_t  m_lastUsedFlowId;        //!< keep track of last used subflow
-  Ptr<MpTcpSocketBase> m_metaSock;  //!<
-  std::map<int, int> m_deficits;
+    RefreshAll ();
+
+    uint32_t pending = m_meta->GetPendingDataSize ();
+    if (pending == 0)
+      {
+        return false;
+      }
+
+    uint32_t metaWin = m_meta->AvailableWindow ();
+    if (metaWin == 0)
+      {
+        return false;
+      }
+
+    int nSubflows = m_meta->GetNActiveSubflows ();
+    int attempts = 0;
+
+    while (attempts < nSubflows)
+      {
+        attempts++;
+        m_lastIdx = (m_lastIdx + 1) % nSubflows;
+        Ptr<MpTcpSubflow> sf = m_meta->GetSubflow (m_lastIdx);
+
+        uint32_t sfWin = sf->AvailableWindow ();
+        uint16_t mss = sf->GetSegSize ();
+        if (mss == 0) mss = 1440;
+
+        if (sfWin < mss)
+          {
+            continue;
+          }
+
+        activeSubflowArrayId = m_lastIdx;
+        dsn = SequenceNumber64 (m_meta->Getvalue_nextTxSeq ().GetValue ());
+        length = std::min ((uint32_t)mss, std::min (sfWin, std::min (metaWin, pending)));
+        TelemetryTracker::Get ().RecordTx (m_lastIdx);
+        MaybeLogDecision (dsn, length, m_lastIdx, nSubflows);
+        return (length > 0);
+      }
+
+    return false;
+  }
+
+private:
+  int m_lastIdx;
 };
 
-} // end of 'ns3'
+// Backwards compatibility alias
+typedef MpTcpSchedulerRoundRobin MpTcpSchedulerRoundRobinCustom;
+
+} // namespace ns3
 
 #endif /* MPTCP_SCHEDULER_ROUND_ROBIN_H */
