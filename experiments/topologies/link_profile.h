@@ -1,75 +1,77 @@
+/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 #ifndef LINK_PROFILE_H
 #define LINK_PROFILE_H
 
+#include "ns3/core-module.h"
+#include "ns3/point-to-point-helper.h"
 #include <string>
-#include <vector>
+#include <algorithm>
 
 namespace ns3 {
 
-// Represents an individual network path/subflow characteristics
-struct PathConfig
+/**
+ * \brief LinkProfile represents a network interface path configuration (Wi-Fi, LTE, Ethernet, 5G)
+ * with calibrated Bandwidth-Delay Product (BDP) queue sizing as documented in research literature
+ * (Hurtig et al. BLEST 2016, Lim et al. ECF 2017, Paasch et al. 2014).
+ */
+struct LinkProfile
 {
-  std::string name;          // e.g. "Ethernet", "WiFi", "Cellular"
-  std::string bandwidth;     // e.g. "100Mbps", "40Mbps", "15Mbps"
-  std::string delay;         // e.g. "5ms", "25ms", "80ms"
-  double lossRate;           // e.g. 0.0, 0.005 (0.5%), 0.01 (1%)
-  uint32_t queueSizePackets; // e.g. 100, 60, 40
+  std::string name;
+  DataRate dataRate;
+  Time delay;
+  double lossRate;
+  uint32_t queueSizePackets;
 
-  PathConfig (std::string n, std::string bw, std::string d, double loss = 0.0, uint32_t q = 100)
-    : name (n), bandwidth (bw), delay (d), lossRate (loss), queueSizePackets (q) {}
-};
+  LinkProfile ()
+    : name ("Default"),
+      dataRate ("10Mbps"),
+      delay (MilliSeconds (20)),
+      lossRate (0.0),
+      queueSizePackets (64)
+  {}
 
-// Represents a real-world multi-interface device profile
-enum DeviceProfileType
-{
-  PROFILE_WIFI_CELLULAR,     // Smartphone: Wi-Fi + 4G/5G Cellular
-  PROFILE_ETHERNET_WIFI,     // Workstation/Desktop: Ethernet + Wi-Fi
-  PROFILE_TRIPLE_PATH,       // Multihomed Gateway: Ethernet + Wi-Fi + Cellular
-  PROFILE_CUSTOM             // User defined parameters
-};
-
-class LinkProfileManager
-{
-public:
-  static std::vector<PathConfig> GetProfile (DeviceProfileType type)
+  LinkProfile (std::string n, std::string rate, Time d, double loss = 0.0, uint32_t qSize = 0)
+    : name (n),
+      dataRate (rate),
+      delay (d),
+      lossRate (loss)
   {
-    std::vector<PathConfig> paths;
-    switch (type)
+    if (qSize > 0)
       {
-      case PROFILE_WIFI_CELLULAR:
-        // Path 0: Wi-Fi (15 Mbps, 15ms, 0.1% loss, 300 pkts buffer)
-        paths.push_back (PathConfig ("WiFi", "15Mbps", "15ms", 0.001, 300));
-        // Path 1: Cellular 4G LTE (5 Mbps, 50ms, 0.3% loss, 200 pkts buffer)
-        paths.push_back (PathConfig ("Cellular", "5Mbps", "50ms", 0.003, 200));
-        break;
-
-      case PROFILE_ETHERNET_WIFI:
-        // Path 0: Ethernet (25 Mbps, 5ms, 0 loss, 400 pkts buffer)
-        paths.push_back (PathConfig ("Ethernet", "25Mbps", "5ms", 0.0, 400));
-        // Path 1: Wi-Fi (10 Mbps, 25ms, 0.2% loss, 250 pkts buffer)
-        paths.push_back (PathConfig ("WiFi", "10Mbps", "25ms", 0.002, 250));
-        break;
-
-      case PROFILE_TRIPLE_PATH:
-        // Path 0: Ethernet (20 Mbps, 5ms, 0 loss, 350 pkts buffer)
-        paths.push_back (PathConfig ("Ethernet", "20Mbps", "5ms", 0.0, 350));
-        // Path 1: Wi-Fi (10 Mbps, 25ms, 0.2% loss, 250 pkts buffer)
-        paths.push_back (PathConfig ("WiFi", "10Mbps", "25ms", 0.002, 250));
-        // Path 2: Cellular (5 Mbps, 60ms, 0.5% loss, 200 pkts buffer)
-        paths.push_back (PathConfig ("Cellular", "5Mbps", "60ms", 0.005, 200));
-        break;
-
-      case PROFILE_CUSTOM:
-      default:
-        // Canonical Research Ratio: Ethernet 5Mbps + WiFi 1Mbps
-        paths.push_back (PathConfig ("Path0", "5Mbps", "10ms", 0.0, 250));
-        paths.push_back (PathConfig ("Path1", "1Mbps", "30ms", 0.0, 150));
-        break;
+        queueSizePackets = qSize;
       }
-    return paths;
+    else
+      {
+        // Calibrate BDP = (Rate * RTT) / (MSS * 8) with 1.5x multiplier to allow full CWND growth
+        // without inducing chronic bufferbloat.
+        double rateBps = DataRate (rate).GetBitRate ();
+        double rttSec = (d * 2).GetSeconds ();
+        double bdpPackets = (rateBps * rttSec) / (1440.0 * 8.0);
+        queueSizePackets = std::max (20u, static_cast<uint32_t> (bdpPackets * 1.5));
+      }
+  }
+
+  static LinkProfile CreateEthernet (std::string rate = "25Mbps", Time delay = MilliSeconds (5), double loss = 0.0001)
+  {
+    return LinkProfile ("Ethernet", rate, delay, loss);
+  }
+
+  static LinkProfile CreateWiFi (std::string rate = "15Mbps", Time delay = MilliSeconds (15), double loss = 0.005)
+  {
+    return LinkProfile ("WiFi", rate, delay, loss);
+  }
+
+  static LinkProfile CreateCellularLTE (std::string rate = "6Mbps", Time delay = MilliSeconds (45), double loss = 0.015)
+  {
+    return LinkProfile ("CellularLTE", rate, delay, loss);
+  }
+
+  static LinkProfile CreateCellular5G (std::string rate = "10Mbps", Time delay = MilliSeconds (50), double loss = 0.015)
+  {
+    return LinkProfile ("Cellular5G", rate, delay, loss);
   }
 };
 
 } // namespace ns3
 
-#endif // LINK_PROFILE_H
+#endif /* LINK_PROFILE_H */

@@ -1,20 +1,11 @@
-# Ignore entire cloned ns-3 simulator tree (only keep our own code and symlinks/scripts)
+# Ignore cloned simulator tree
 ns-3-mptcp/
 
-# Python cache and bytecode
+# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-.ipynb_checkpoints/
 
-# Simulation raw outputs & traces (too large for git)
-dataset/raw/*.pcap
-dataset/raw/*.tr
-dataset/raw/*.log
-dataset/raw/*.csv
-
-# Build artifacts
-*.o
-*.so
-*.out
-*.exe
+# Raw traces and temp artifacts
+*.pcap
+*.tr
+*.log

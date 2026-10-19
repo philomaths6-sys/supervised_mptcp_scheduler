@@ -1,0 +1,393 @@
+diff --git a/src/internet/model/mptcp-socket-base.cc b/src/internet/model/mptcp-socket-base.cc
+index dba9c0d..15a272f 100644
+--- a/src/internet/model/mptcp-socket-base.cc
++++ b/src/internet/model/mptcp-socket-base.cc
+@@ -42,6 +42,7 @@
+ #include "ns3/mptcp-socket-base.h"
+ #include "ns3/mptcp-subflow.h"
+ #include "ns3/tcp-option-mptcp.h"
++#include "ns3/tcp-recovery-ops.h"
+ #include "ns3/callback.h"
+ #include "ns3/trace-helper.h"
+ #include "ns3/mptcp-ndiffports.h"
+@@ -188,10 +189,32 @@ MpTcpSocketBase::~MpTcpSocketBase(void)
+ void
+ MpTcpSocketBase::CreateScheduler(TypeId schedulerTypeId)
+ {
+-  NS_LOG_FUNCTION(this);
+-  NS_LOG_WARN("Overriding scheduler choice");
++  NS_LOG_FUNCTION(this << schedulerTypeId);
++
++  if (schedulerTypeId == TypeId () || schedulerTypeId == MpTcpScheduler::GetTypeId ())
++    {
++      TypeId mptcpTid = TypeId::LookupByName ("ns3::MpTcpSocketBase");
++      for (uint32_t i = 0; i < mptcpTid.GetAttributeN (); ++i)
++        {
++          struct TypeId::AttributeInformation info = mptcpTid.GetAttribute (i);
++          if (info.name == "Scheduler")
++            {
++              const TypeIdValue *tval = dynamic_cast<const TypeIdValue*> (PeekPointer (info.initialValue));
++              if (tval && tval->Get () != MpTcpScheduler::GetTypeId ())
++                {
++                  schedulerTypeId = tval->Get ();
++                }
++              break;
++            }
++        }
++    }
++
++  if (schedulerTypeId == TypeId () || schedulerTypeId == MpTcpScheduler::GetTypeId ())
++    {
++      schedulerTypeId = MpTcpSchedulerRoundRobin::GetTypeId ();
++    }
++
+   ObjectFactory schedulerFactory;
+-  schedulerTypeId = MpTcpSchedulerRoundRobin::GetTypeId();
+   schedulerFactory.SetTypeId(schedulerTypeId);
+   m_scheduler = schedulerFactory.Create<MpTcpScheduler>();
+   m_scheduler->SetMeta(this);
+@@ -298,7 +321,12 @@ bool
+ MpTcpSocketBase::UpdateWindowSize(const TcpHeader& header)
+ {
+   NS_LOG_FUNCTION(this);
+-  m_rWnd = header.GetWindowSize();
++  uint32_t scaledWin = header.GetWindowSize ();
++  if (!m_subflows[Established].empty ())
++    {
++      scaledWin = m_subflows[Established][0]->m_rWnd.Get ();
++    }
++  m_rWnd = scaledWin;
+   return true;
+ }
+ 
+@@ -470,6 +498,7 @@ MpTcpSocketBase::OnSubflowConnectionSuccess (Ptr<Socket> socket)
+   NS_LOG_LOGIC(this);
+   Ptr<MpTcpSubflow> sf = DynamicCast<MpTcpSubflow>(socket);
+   NotifySubflowConnected(sf);
++  SendPendingData (false);
+ }
+ 
+ void
+@@ -524,6 +553,7 @@ MpTcpSocketBase::AddSubflow(Ptr<MpTcpSubflow> sflow)
+                          MakeNullCallback<bool, Ptr<Socket>, const Address &>(),
+                          MakeCallback (&MpTcpSocketBase::OnSubflowCreated,this));
+   sf->SetCongestionControlAlgorithm(this->m_congestionControl);
++  sf->SetRecoveryAlgorithm(this->m_recoveryOps);
+   m_subflows[Others].push_back( sf );
+ }
+ 
+@@ -661,22 +691,21 @@ MpTcpSocketBase::CreateSubflowsForMesh()
+         {
+           // To get hold of the class pointers:
+           Ipv4Address remoteAddress = it->first;
+-          uint16_t localPort = rand() % 65000;
+-          uint16_t remotePort = rand() % 65000;
++          uint16_t localPort = 10000 + (rand () % 50000);
++          uint16_t remotePort = dPort;
+           if (localPort == sPort)
+             {
+-              NS_LOG_UNCOND("Generated random port is the same as meta subflow's local port, increment by +1");
+               localPort++;
+             }
+-          if (remotePort == dPort)
+-            {
+-              NS_LOG_UNCOND("Generated random port is the same as meta subflow's peer port, increment by +1");
+-              remotePort++;
+-            }
+           if ( (sAddr == localAddress) && (dAddr == remoteAddress) )
+            {
+              continue;
+            }
++          // Only create subflow if localAddress and remoteAddress belong to the same path/subnet
++          if (((localAddress.Get () >> 16) & 0xff) != ((remoteAddress.Get () >> 16) & 0xff))
++           {
++             continue;
++           }
+           // Set up subflow based on different source ports
+           Ptr<MpTcpSubflow> subflow;
+           Ptr<Socket> sock = m_tcp->CreateSocket(m_congestionControl, MpTcpSubflow::GetTypeId());
+@@ -689,7 +718,6 @@ MpTcpSocketBase::CreateSubflowsForMesh()
+           subflow->m_dataRetrCount = m_dataRetries;
+           subflow->m_endPoint = m_tcp->Allocate(GetBoundNetDevice (), localAddress, localPort, remoteAddress, remotePort);
+           NS_LOG_INFO ("subflow endPoiont "<< subflow->m_endPoint);
+-          m_endPoint = subflow->m_endPoint;
+           subflow->SetupCallback();
+           bool result = m_tcp->AddSocket(this);
+           if(!result)
+@@ -757,7 +785,6 @@ int
+ MpTcpSocketBase::Bind(const Address &address)
+ {
+   NS_LOG_FUNCTION (this<<address);
+-  NS_FATAL_ERROR("TO remove");
+   return TcpSocketBase::Bind(address);
+ }
+ 
+@@ -894,7 +921,7 @@ MpTcpSocketBase::SendPendingData(bool withAck)
+      }
+   }  
+   //  MappingList mappings;
+-  if (m_txBuffer->Size () == 0)
++  if (m_txBuffer->Size () == 0 || (m_tcb && m_txBuffer->SizeFromSequence(m_tcb->m_nextTxSequence) == 0))
+     {
+       return false;                           // Nothing to send
+     }
+@@ -1058,7 +1085,6 @@ MpTcpSocketBase::AdvertiseAddresses()
+        Address address = InetSocketAddress(interfaceAddr.GetLocal(), m_endPoint->GetLocalPort ());
+        Ptr<TcpOptionMpTcpAddAddress> addaddr =  CreateObject<TcpOptionMpTcpAddAddress>();
+        uint8_t addrId = j;
+-       std::cout<<" advertising "<<interfaceAddr.GetLocal()<<" "<<m_endPoint->GetLocalPort ()<<std::endl;
+        addaddr->SetAddress (address, addrId);
+        NS_LOG_INFO("Appended option" << addaddr);
+        header.AppendOption( addaddr );
+@@ -1289,10 +1315,10 @@ uint32_t
+ MpTcpSocketBase::AvailableWindow() const
+ {
+   NS_LOG_FUNCTION (this);
+-  uint32_t unack = UnAckDataCount(); // Number of outstanding bytes
+-  uint32_t win = Window(); // Number of bytes allowed to be outstanding
+-  NS_LOG_LOGIC ("UnAckCount=" << unack << ", Win=" << win);
+-  return (win < unack) ? 0 : (win - unack);
++  uint32_t win = m_rWnd.Get () > 0 ? m_rWnd.Get () : Window ();
++  uint32_t inflight = BytesInFlight ();
++  NS_LOG_LOGIC ("InFlight=" << inflight << ", Win=" << win);
++  return (win < inflight) ? 0 : (win - inflight);
+ }
+ 
+ void
+@@ -1360,6 +1386,7 @@ MpTcpSocketBase::ReceivedAck(
+       bool resetRTO = true;
+       NewAck( dack, resetRTO );
+       m_dupAckCount = 0;
++      SendPendingData (false);
+     }
+ }
+ 
+@@ -1533,6 +1560,17 @@ MpTcpSocketBase::GetTxAvailable(void) const
+   return value;
+ }
+ 
++uint32_t
++MpTcpSocketBase::GetPendingDataSize(void) const
++{
++  NS_LOG_FUNCTION (this);
++  if (!m_txBuffer || !m_tcb)
++    {
++      return 0;
++    }
++  return m_txBuffer->SizeFromSequence(m_tcb->m_nextTxSequence);
++}
++
+ /* This function should be overridable since it may depend on the CC, cf RFC:
+    To compute cwnd_total, it is an easy mistake to sum up cwnd_i across
+    all subflows: when a flow is in fast retransmit, its cwnd is
+diff --git a/src/internet/model/mptcp-socket-base.h b/src/internet/model/mptcp-socket-base.h
+index f36eaff..00b3b61 100644
+--- a/src/internet/model/mptcp-socket-base.h
++++ b/src/internet/model/mptcp-socket-base.h
+@@ -271,6 +271,7 @@ public:
+   virtual void DoPeerClose (void); // FIN is in sequence, notify app and respond with a FIN
+   virtual int DoClose(void);
+   virtual uint32_t GetTxAvailable() const;
++  virtual uint32_t GetPendingDataSize() const;
+   virtual uint32_t GetRxAvailable(void) const;
+   virtual void ForwardUp (Ptr<Packet> packet, Ipv4Header header, uint16_t port, Ptr<Ipv4Interface> incomingInterface);
+ 
+diff --git a/src/internet/model/mptcp-subflow.cc b/src/internet/model/mptcp-subflow.cc
+index ad7372b..0c37438 100644
+--- a/src/internet/model/mptcp-subflow.cc
++++ b/src/internet/model/mptcp-subflow.cc
+@@ -303,6 +303,7 @@ void
+ MpTcpSubflow::Retransmit(void)
+ {
+   NS_LOG_FUNCTION (this);
++  DoRetransmit ();
+ }
+ 
+ void
+@@ -939,6 +940,44 @@ MpTcpSubflow::Window (void) const
+   return TcpSocketBase::Window();
+ }
+ 
++Time
++MpTcpSubflow::GetRttEstimate (void) const
++{
++  if (m_rtt)
++    {
++      Time est = m_rtt->GetEstimate ();
++      if (est.GetMilliSeconds () > 0)
++        {
++          return est;
++        }
++    }
++  if (m_tcb && m_tcb->m_lastRtt.Get ().GetMilliSeconds () > 0)
++    {
++      return m_tcb->m_lastRtt.Get ();
++    }
++  return MilliSeconds (20);
++}
++
++Time
++MpTcpSubflow::GetMinRtt (void) const
++{
++  if (m_tcb && m_tcb->m_minRtt != Time::Max ())
++    {
++      return m_tcb->m_minRtt;
++    }
++  return GetRttEstimate ();
++}
++
++uint32_t
++MpTcpSubflow::GetCwnd (void) const
++{
++  if (m_tcb)
++    {
++      return m_tcb->m_cWnd;
++    }
++  return 1440 * 10;
++}
++
+ uint16_t
+ MpTcpSubflow::AdvertisedWindowSize(bool scale) const
+ {
+@@ -1018,6 +1057,10 @@ MpTcpSubflow::ReceivedAck(Ptr<Packet> p, const TcpHeader& header)
+   // By default we always append a DACK
+   // We should consider more advanced schemes
+   AppendDSSAck();
++  if (GetMeta ())
++    {
++      GetMeta ()->SendPendingData (false);
++    }
+ }
+ 
+ } // end of ns3
+diff --git a/src/internet/model/mptcp-subflow.h b/src/internet/model/mptcp-subflow.h
+index bc6a172..c41327f 100644
+--- a/src/internet/model/mptcp-subflow.h
++++ b/src/internet/model/mptcp-subflow.h
+@@ -77,6 +77,9 @@ public:
+   virtual uint32_t BytesInFlight (void) const;
+   virtual uint32_t AvailableWindow (void) const;
+   virtual uint32_t Window (void) const;          // Return the max possible number of unacked bytes
++  virtual Time GetRttEstimate (void) const;
++  virtual Time GetMinRtt (void) const;
++  virtual uint32_t GetCwnd (void) const;
+ 
+   /**
+    * \brief will update the meta rwnd. Called by subflows whose
+diff --git a/src/internet/model/tcp-l4-protocol.cc b/src/internet/model/tcp-l4-protocol.cc
+index a1b2066..3718423 100644
+--- a/src/internet/model/tcp-l4-protocol.cc
++++ b/src/internet/model/tcp-l4-protocol.cc
+@@ -238,15 +238,19 @@ TcpL4Protocol::CreateSocket (Ptr<TcpCongestionOps> algo, TypeId socketTypeId)
+   NS_LOG_FUNCTION_NOARGS ();
+   ObjectFactory rttFactory;
+   ObjectFactory socketFactory;
++  ObjectFactory recoveryAlgorithmFactory;
+   rttFactory.SetTypeId (m_rttTypeId);
+   socketFactory.SetTypeId(socketTypeId);
++  recoveryAlgorithmFactory.SetTypeId (m_recoveryTypeId);
+ 
+   Ptr<RttEstimator>  rtt = rttFactory.Create<RttEstimator> ();
+   Ptr<TcpSocketBase> socket = socketFactory.Create<TcpSocketBase> ();
++  Ptr<TcpRecoveryOps> recovery = recoveryAlgorithmFactory.Create<TcpRecoveryOps> ();
+   socket->SetNode (m_node);
+   socket->SetTcp (this);
+   socket->SetRtt (rtt);
+   socket->SetCongestionControlAlgorithm (algo);
++  socket->SetRecoveryAlgorithm (recovery);
+   m_sockets.push_back (socket);
+   return socket;
+ }
+@@ -510,47 +514,40 @@ TcpL4Protocol::Receive (Ptr<Packet> packet,
+       return checksumControl;
+     }
+ 
+-  Ipv4EndPointDemux::EndPoints endPoints;
+-  endPoints = m_endPoints->Lookup (incomingIpHeader.GetDestination (),
+-                                   incomingTcpHeader.GetDestinationPort (),
+-                                   incomingIpHeader.GetSource (),
+-                                   incomingTcpHeader.GetSourcePort (),
+-                                   incomingInterface);
+-
+-  if (endPoints.empty())
+-   {
+-     NS_LOG_LOGIC ("No Ipv4 endpoints matched on TcpL4Protocol, "
+-                   "checking if packet is a MP_JOIN request:" << incomingIpHeader);
+-
+-    // MPTCP related modification----------------------------
+-    // Extract MPTCP options if there is any
+-    Ptr<const TcpOptionMpTcpJoin> join;
+-    Ptr<MpTcpSocketBase> meta;
++  // MPTCP related modification----------------------------
++  // Extract MPTCP options if there is any
++  Ptr<const TcpOptionMpTcpJoin> join;
++  Ptr<MpTcpSocketBase> meta;
+ 
+-    // If it is a SYN packet with an MP_JOIN option
+-    if( (incomingTcpHeader.GetFlags() & TcpHeader::SYN)
+-        && GetTcpOption(incomingTcpHeader, join)
+-        && join->GetMode() == TcpOptionMpTcpJoin::Syn
+-       )
++  // If it is a SYN packet with an MP_JOIN option
++  if ((incomingTcpHeader.GetFlags() & TcpHeader::SYN)
++      && GetTcpOption(incomingTcpHeader, join)
++      && join->GetMode() == TcpOptionMpTcpJoin::Syn)
+     {
+       meta = DynamicCast<MpTcpSocketBase>(LookupMpTcpToken(join->GetPeerToken()));
+       if (meta)
+         {
+           NS_LOG_LOGIC ("Found meta " << meta << " matching MP_JOIN token=" << join->GetPeerToken());
+-          Ipv4EndPoint *endP =  meta->NewSubflowRequest(
++          Ipv4EndPoint *endP = meta->NewSubflowRequest(
+                  packet,
+                  incomingTcpHeader,
+                  InetSocketAddress(incomingIpHeader.GetSource(), incomingTcpHeader.GetSourcePort() ),
+                  InetSocketAddress(incomingIpHeader.GetDestination(), incomingTcpHeader.GetDestinationPort() ) ,
+                  join
+                  );
+-            if(endP)
++          if (endP)
+             {
+-              endPoints.push_back(endP);
++              return IpL4Protocol::RX_OK;
+             }
+         }
+     }
+-  }
++
++  Ipv4EndPointDemux::EndPoints endPoints;
++  endPoints = m_endPoints->Lookup (incomingIpHeader.GetDestination (),
++                                   incomingTcpHeader.GetDestinationPort (),
++                                   incomingIpHeader.GetSource (),
++                                   incomingTcpHeader.GetSourcePort (),
++                                   incomingInterface);
+ 
+   if (endPoints.empty ())
+     {
+diff --git a/src/internet/model/tcp-socket-base.cc b/src/internet/model/tcp-socket-base.cc
+index e71dece..a429502 100644
+--- a/src/internet/model/tcp-socket-base.cc
++++ b/src/internet/model/tcp-socket-base.cc
+@@ -4115,6 +4115,10 @@ void
+ TcpSocketBase::AddMpTcpOptions (TcpHeader& header)
+ {
+   NS_LOG_FUNCTION(this);
++  if (!m_mptcpEnabled)
++    {
++      return;
++    }
+   // If key not genereated yet
+   if (m_mptcpLocalKey == 0)
+     {
+diff --git a/src/internet/model/tcp-socket-base.h b/src/internet/model/tcp-socket-base.h
+index f276ece..e18f807 100644
+--- a/src/internet/model/tcp-socket-base.h
++++ b/src/internet/model/tcp-socket-base.h
+@@ -1336,6 +1336,7 @@ protected:
+   TracedValue<SequenceNumber32> m_ecnEchoSeq {0};      //!< Sequence number of the last received ECN Echo
+   TracedValue<SequenceNumber32> m_ecnCESeq   {0};      //!< Sequence number of the last received Congestion Experienced
+   TracedValue<SequenceNumber32> m_ecnCWRSeq  {0};      //!< Sequence number of the last sent CWR
++  uint8_t                       m_mptcpPlacementNewPadding[1024] {}; //!< Buffer so MpTcpSocketBase placement new fits without heap overflow
+ };
+ 
+ /**

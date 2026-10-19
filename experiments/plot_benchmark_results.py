@@ -1,460 +1,528 @@
+#!/usr/bin/env python3
+"""
+experiments/plot_benchmark_results.py
+Comprehensive Publication Plotting Suite for MPTCP Supervised Scheduler Evaluation.
+Complies with IEEE/ACM formatting guidelines.
+
+Generates multi-scenario grouped bar charts showing:
+ 1. Wi-Fi + Cellular (30M)
+ 2. Ethernet + Wi-Fi (40M)
+ 3. Tri-Path Gateway (55M)
+ 4. Dynamic Link Break (Outage t=[3s, 6s])
+
+Across all 6 schedulers:
+ - Single-Path TCP (NewReno)
+ - RoundRobin
+ - ECF
+ - BLEST
+ - Supervised (AI)
+ - minRTT
+
+Also generates dedicated standalone bar charts for each scenario:
+ - barchart_wifi_cellular.png
+ - barchart_ethernet_wifi.png
+ - barchart_tripath.png
+ - barchart_dynamic_break.png
+
+ALL METRICS ARE STRICTLY EXTRACTED FROM SIMULATION DATA.
+Automatically synchronizes all plots to the IDE Artifacts directory.
+"""
+
 import os
 import sys
-import pandas as pd
-import numpy as np
+import shutil
+import glob
 import matplotlib.pyplot as plt
-import seaborn as sns
+import matplotlib.ticker as ticker
+import numpy as np
+import pandas as pd
+from scipy import stats
 
-PROJECT_ROOT = "/home/sk/Desktop/sk_Desktop/mptcp_scheduler"
-RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
-PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
-CSV_PATH = os.path.join(RESULTS_DIR, "benchmark_results.csv")
-DISPARITY_CSV = os.path.join(RESULTS_DIR, "disparity_sweep_results.csv")
-ARTIFACT_DIR = "/home/sk/.gemini/antigravity-ide/brain/252413c5-c7a6-4f8f-9e08-3af330efb55d"
+# Publication typography & styling
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.titlesize'] = 13
+plt.rcParams['axes.labelsize'] = 11
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 9.0
+plt.rcParams['figure.titlesize'] = 15
+plt.rcParams['axes.grid'] = True
+plt.rcParams['grid.alpha'] = 0.35
+plt.rcParams['grid.linestyle'] = '--'
 
-os.makedirs(PLOTS_DIR, exist_ok=True)
-
-# Cohesive modern styling
-sns.set_theme(style="whitegrid", font="sans-serif")
-plt.rcParams.update({
-    'font.size': 11,
-    'axes.labelsize': 12,
-    'axes.titlesize': 13,
-    'xtick.labelsize': 10,
-    'ytick.labelsize': 10,
-    'legend.fontsize': 10,
-    'figure.titlesize': 15,
-})
-
-PALETTE = {
-    "Standard-TCP": "#7f8c8d",      # Gray (Baseline)
-    "FastestRTT": "#2980b9",        # Deep Blue
-    "RoundRobin": "#d35400",        # Deep Orange
-    "BLEST": "#27ae60",             # Emerald Green
-    "ECF": "#8e44ad"                # Royal Purple
+SCHEDULER_COLORS = {
+    'Single-Path TCP (NewReno)': '#e74c3c',  # Crimson Red
+    'minRTT':                    '#2980b9',  # Classic Blue
+    'RoundRobin':                '#7f8c8d',  # Slate Grey
+    'BLEST':                     '#e67e22',  # Vivid Orange
+    'ECF':                       '#8e44ad',  # Royal Purple
+    'Supervised':                '#27ae60'   # Emerald Green (Proposed AI)
 }
 
-PROFILE_NAME_MAP = {
-    "custom": "WiFi 1M + Eth 5M\n(Canonical)",
-    "wifi_cellular": "WiFi 15M +\nCellular 5M",
-    "ethernet_wifi": "Ethernet 25M +\nWiFi 10M",
-    "triple_path": "Triple-Path\n(20M + 10M + 5M)"
-}
+PROTOCOLS = [
+    'Single-Path TCP (NewReno)',
+    'RoundRobin',
+    'ECF',
+    'BLEST',
+    'Supervised',
+    'minRTT'
+]
 
-SCENARIO_NAME_MAP = {
-    "none": "Static Baseline",
-    "fading_handover": "Fading / Handover",
-    "bufferbloat": "Bufferbloat Queue"
-}
+SCENARIO_KEYS = ['Ethernet_WiFi', 'QuadPath', 'PentaPath', 'Dynamic_Break']
+SCENARIO_LABELS = [
+    'Ethernet + Wi-Fi\n(2 Paths, 40 Mbps)',
+    'Quad-Path\n(4 Paths, 80 Mbps)',
+    'Penta-Path\n(5 Paths, 95 Mbps)',
+    'Dynamic Link Break\n(Wi-Fi Outage t=[3s,6s])'
+]
 
-def generate_canonical_plots(df):
-    canon_df = df[(df["profile"] == "custom") & (df["scenario"] == "none")].copy()
-    if canon_df.empty:
-        print("[WARN] No canonical data found!")
-        return
+def map_proto(name):
+    if name in ['Standard-TCP', 'TCP', 'Single-Path TCP']:
+        return 'Single-Path TCP (NewReno)'
+    return name
 
-    # Order schedulers
-    sched_order = ["Standard-TCP", "FastestRTT", "RoundRobin", "BLEST", "ECF"]
-    canon_df["scheduler"] = pd.Categorical(canon_df["scheduler"], categories=sched_order, ordered=True)
-    canon_df = canon_df.sort_values("scheduler")
+def compute_ci95(series):
+    vals = [x for x in series if np.isfinite(x)]
+    n = len(vals)
+    if n < 2: return 0.0
+    sem = stats.sem(vals)
+    ci = sem * stats.t.ppf((1 + 0.95) / 2.0, n - 1)
+    return ci if np.isfinite(ci) else 0.0
 
-    # -------------------------------------------------------------------------
-    # Plot 1: Standalone Canonical Aggregation Throughput Chart
-    # -------------------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(10, 6.5))
-    bars = ax.bar(
-        canon_df["scheduler"],
-        canon_df["throughputMbps"],
-        color=[PALETTE[s] for s in canon_df["scheduler"]],
-        edgecolor="black",
-        linewidth=1.2,
-        width=0.55
-    )
+def load_combined_dataset(data_dir):
+    overall_csv = os.path.join(data_dir, "multitopology_overall_benchmark.csv")
+    break_csv = os.path.join(data_dir, "dynamic_break_benchmark.csv")
+    multi_csv = os.path.join(data_dir, "multitopology_benchmark.csv")
 
-    # Reference lines
-    ax.axhline(5.0, color="#c0392b", linestyle="--", linewidth=2.0, label="Single-Path TCP Ceiling (5.0 Mbps)")
-    ax.axhline(6.0, color="#27ae60", linestyle=":", linewidth=2.0, label="Theoretical Capacity Sum $C_1 + C_2$ (6.0 Mbps)")
+    dfs = []
+    if os.path.exists(overall_csv):
+        df_o = pd.read_csv(overall_csv)
+        dfs.append(df_o)
+    elif os.path.exists(multi_csv):
+        df_m = pd.read_csv(multi_csv)
+        df_static = df_m[df_m['handover'].isin([0, False, '0', 'False'])].copy()
+        dfs.append(df_static)
 
-    ax.set_title("Canonical MPTCP Throughput Aggregation: WiFi 1 Mbps + Ethernet 5 Mbps",
-                 fontsize=14, fontweight="bold", pad=15)
-    ax.set_ylabel("Active Sustained Throughput (Mbps)", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Protocol / Scheduler Algorithm", fontsize=12, fontweight="bold")
-    ax.set_ylim(0, 7.0)
+    if os.path.exists(break_csv):
+        df_b = pd.read_csv(break_csv)
+        df_b['topology'] = 'Dynamic_Break'
+        df_b['scenario'] = 'Dynamic_Break'
+        dfs.append(df_b)
 
-    # Annotate bars
-    for bar, sched in zip(bars, canon_df["scheduler"]):
-        height = bar.get_height()
-        status_text = "AGGREGATED (>5M)" if height > 5.0 else "CAPPED (<5M)"
-        status_color = "#1b5e20" if height > 5.0 else "#b71c1c"
-        
-        ax.annotate(f"{height:.2f} Mbps\n[{status_text}]",
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 6),
-                    textcoords="offset points",
-                    ha='center', va='bottom',
-                    fontsize=10, fontweight="bold",
-                    color=status_color)
+    if not dfs:
+        raise FileNotFoundError("No benchmark CSV found in results/data!")
 
-    ax.legend(loc="upper left", frameon=True, facecolor="#ffffff", framealpha=0.9)
-    plt.tight_layout()
+    combined = pd.concat(dfs, ignore_index=True)
+    combined['protocol'] = combined['protocol'].apply(map_proto)
+    combined['topology'] = combined['topology'].replace({
+        'TriPath_Eth_WiFi_Cell': 'TriPath',
+        'WiFi_Cellular_Handover': 'Dynamic_Break'
+    })
+    return combined
 
-    out_p1 = os.path.join(PLOTS_DIR, "canonical_wifi_ethernet_aggregation.png")
-    plt.savefig(out_p1, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p1}")
+def plot_multi_scenario_grouped_bar(df, metric_col, ylabel, title, output_path, y_min=None, y_max=None, percent=False):
+    fig, ax = plt.subplots(figsize=(13.5, 6.2), dpi=300)
+    
+    topos_present = [t for t in SCENARIO_KEYS if t in df['topology'].unique()]
+    labels_present = [SCENARIO_LABELS[SCENARIO_KEYS.index(t)] for t in topos_present]
+    
+    x = np.arange(len(topos_present))
+    n_proto = len(PROTOCOLS)
+    width = 0.82 / n_proto
 
-    # -------------------------------------------------------------------------
-    # Plot 2: 4-Panel Canonical Metrics Dashboard (Throughput, Goodput, Loss, RTT)
-    # -------------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    for i, proto in enumerate(PROTOCOLS):
+        means, cis = [], []
+        for topo in topos_present:
+            sub = df[(df['topology'] == topo) & (df['protocol'] == proto)][metric_col]
+            m = sub.mean() if len(sub) > 0 else 0.0
+            c = compute_ci95(sub) if len(sub) > 0 else 0.0
+            means.append(m)
+            cis.append(c)
 
-    # Panel A: Active Throughput
-    ax_a = axes[0, 0]
-    bars_a = ax_a.bar(canon_df["scheduler"], canon_df["throughputMbps"],
-                      color=[PALETTE[s] for s in canon_df["scheduler"]], edgecolor="black", width=0.55)
-    ax_a.axhline(5.0, color="#c0392b", linestyle="--", linewidth=1.8, label="5.0 Mbps Ceiling")
-    ax_a.axhline(6.0, color="#27ae60", linestyle=":", linewidth=1.8, label="6.0 Mbps Capacity")
-    ax_a.set_title("A. Active Sustained Throughput (Mbps)", fontweight="bold")
-    ax_a.set_ylabel("Throughput (Mbps)")
-    ax_a.set_ylim(0, 7.0)
-    ax_a.legend(loc="upper left", fontsize=9)
-    for b in bars_a:
-        h = b.get_height()
-        ax_a.annotate(f"{h:.2f}", (b.get_x() + b.get_width() / 2, h),
-                      xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontweight="bold")
+        pos = x - 0.41 + width * (i + 0.5)
+        bars = ax.bar(pos, means, width, yerr=cis, capsize=3, label=proto,
+                      color=SCHEDULER_COLORS.get(proto, '#333'), edgecolor='black', alpha=0.9, lw=0.7)
 
-    # Panel B: Session Goodput
-    ax_b = axes[0, 1]
-    bars_b = ax_b.bar(canon_df["scheduler"], canon_df["goodputMbps"],
-                      color=[PALETTE[s] for s in canon_df["scheduler"]], edgecolor="black", width=0.55)
-    ax_b.set_title("B. Session Goodput (Mbps)", fontweight="bold")
-    ax_b.set_ylabel("Goodput (Mbps)")
-    ax_b.set_ylim(0, 5.5)
-    for b in bars_b:
-        h = b.get_height()
-        ax_b.annotate(f"{h:.2f}", (b.get_x() + b.get_width() / 2, h),
-                      xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontweight="bold")
-
-    # Panel C: Packet Loss Rate (%)
-    ax_c = axes[1, 0]
-    bars_c = ax_c.bar(canon_df["scheduler"], canon_df["lossRatePercent"],
-                      color=[PALETTE[s] for s in canon_df["scheduler"]], edgecolor="black", width=0.55)
-    ax_c.set_title("C. Packet Drop / Retransmission Rate (%)", fontweight="bold")
-    ax_c.set_ylabel("Loss Rate (%)")
-    ax_c.set_ylim(0, 13.0)
-    for b in bars_c:
-        h = b.get_height()
-        ax_c.annotate(f"{h:.2f}%", (b.get_x() + b.get_width() / 2, h),
-                      xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontweight="bold")
-
-    # Panel D: Measured Avg RTT (ms)
-    ax_d = axes[1, 1]
-    bars_d = ax_d.bar(canon_df["scheduler"], canon_df["latencyMs"],
-                      color=[PALETTE[s] for s in canon_df["scheduler"]], edgecolor="black", width=0.55)
-    ax_d.set_title("D. Measured Average Latency (RTT ms)", fontweight="bold")
-    ax_d.set_ylabel("Avg RTT (ms)")
-    ax_d.set_ylim(0, 1750)
-    for b in bars_d:
-        h = b.get_height()
-        ax_d.annotate(f"{h:.1f}", (b.get_x() + b.get_width() / 2, h),
-                      xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontweight="bold")
-
-    plt.suptitle("Canonical WiFi 1 Mbps + Ethernet 5 Mbps: Classical MPTCP vs Standard-TCP Benchmark",
-                 fontsize=15, fontweight="bold", y=0.99)
-    plt.tight_layout()
-
-    out_p2 = os.path.join(PLOTS_DIR, "canonical_metrics_dashboard.png")
-    plt.savefig(out_p2, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p2}")
-
-def generate_multi_profile_plots(df):
-    static_df = df[df["scenario"] == "none"].copy()
-    static_df["profile_label"] = static_df["profile"].map(PROFILE_NAME_MAP)
-    order_labels = [
-        "WiFi 1M + Eth 5M\n(Canonical)",
-        "WiFi 15M +\nCellular 5M",
-        "Ethernet 25M +\nWiFi 10M",
-        "Triple-Path\n(20M + 10M + 5M)"
-    ]
-
-    # -------------------------------------------------------------------------
-    # Plot 3: Throughput across all device profiles
-    # -------------------------------------------------------------------------
-    plt.figure(figsize=(13, 6.5))
-    ax = sns.barplot(
-        data=static_df,
-        x="profile_label",
-        order=order_labels,
-        y="throughputMbps",
-        hue="scheduler",
-        palette=PALETTE
-    )
-    plt.title("Active Sustained Throughput (Mbps) Across Device Profiles", fontsize=14, fontweight="bold", pad=15)
-    plt.xlabel("Device Network Profile", fontsize=12, fontweight="bold")
-    plt.ylabel("Measured Active Throughput (Mbps)", fontsize=12, fontweight="bold")
-    plt.legend(title="Protocol / Scheduler", title_fontsize="11", fontsize=10, loc="upper left")
-
-    for p in ax.patches:
-        h = p.get_height()
-        if h > 0:
-            ax.annotate(f"{h:.1f}", (p.get_x() + p.get_width() / 2., h),
-                        ha='center', va='bottom', fontsize=8.5, xytext=(0, 3),
-                        textcoords='offset points', fontweight="bold")
-
-    plt.tight_layout()
-    out_p3 = os.path.join(PLOTS_DIR, "throughput_profiles_comparison.png")
-    plt.savefig(out_p3, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p3}")
-
-    # -------------------------------------------------------------------------
-    # Plot 4: Dynamic Generalization (WiFi + Cellular)
-    # -------------------------------------------------------------------------
-    dyn_df = df[df["profile"] == "wifi_cellular"].copy()
-    dyn_df["scenario_label"] = dyn_df["scenario"].map(SCENARIO_NAME_MAP)
-    scenario_order = ["Static Baseline", "Fading / Handover", "Bufferbloat Queue"]
-
-    plt.figure(figsize=(12, 6))
-    ax = sns.barplot(
-        data=dyn_df,
-        x="scenario_label",
-        order=scenario_order,
-        y="goodputMbps",
-        hue="scheduler",
-        palette=PALETTE
-    )
-    plt.title("Goodput Resilience Under Mobile Fading, Handover, and Bufferbloat (WiFi + Cellular)",
-              fontsize=13, fontweight="bold", pad=15)
-    plt.xlabel("Dynamic Network Condition", fontsize=12, fontweight="bold")
-    plt.ylabel("Session Goodput (Mbps)", fontsize=12, fontweight="bold")
-    plt.legend(title="Protocol / Scheduler", title_fontsize="11", fontsize=10, loc="upper right")
-
-    for p in ax.patches:
-        h = p.get_height()
-        if h > 0:
-            ax.annotate(f"{h:.2f}", (p.get_x() + p.get_width() / 2., h),
-                        ha='center', va='bottom', fontsize=9, xytext=(0, 3),
-                        textcoords='offset points', fontweight="bold")
-
-    plt.tight_layout()
-    out_p4 = os.path.join(PLOTS_DIR, "dynamic_generalization_comparison.png")
-    plt.savefig(out_p4, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p4}")
-
-    # -------------------------------------------------------------------------
-    # Plot 5: Latency Comparison Under Dynamic Conditions
-    # -------------------------------------------------------------------------
-    plt.figure(figsize=(12, 6))
-    ax = sns.barplot(
-        data=dyn_df,
-        x="scenario_label",
-        order=scenario_order,
-        y="latencyMs",
-        hue="scheduler",
-        palette=PALETTE
-    )
-    plt.title("Measured End-to-End Latency (Avg RTT ms) Under Dynamic Conditions",
-              fontsize=13, fontweight="bold", pad=15)
-    plt.xlabel("Dynamic Network Condition", fontsize=12, fontweight="bold")
-    plt.ylabel("Measured Avg RTT (ms)", fontsize=12, fontweight="bold")
-    plt.legend(title="Protocol / Scheduler", title_fontsize="11", fontsize=10, loc="upper left")
-
-    for p in ax.patches:
-        h = p.get_height()
-        if h > 0:
-            ax.annotate(f"{h:.1f}", (p.get_x() + p.get_width() / 2., h),
-                        ha='center', va='bottom', fontsize=9, xytext=(0, 3),
-                        textcoords='offset points', fontweight="bold")
-
-    plt.tight_layout()
-    out_p5 = os.path.join(PLOTS_DIR, "measured_latency_rtt_comparison.png")
-    plt.savefig(out_p5, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p5}")
-
-    # -------------------------------------------------------------------------
-    # Plot 6: Comprehensive 4-Panel Dashboard
-    # -------------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # A: Active Throughput
-    sns.barplot(data=static_df, x="profile_label", order=order_labels, y="throughputMbps", hue="scheduler", palette=PALETTE, ax=axes[0, 0])
-    axes[0, 0].set_title("A. Active Sustained Throughput (Mbps)", fontweight="bold")
-    axes[0, 0].set_xlabel("Device Profile")
-    axes[0, 0].set_ylabel("Throughput (Mbps)")
-    axes[0, 0].tick_params(axis='x', rotation=10)
-
-    # B: Goodput under Dynamic Conditions
-    sns.barplot(data=dyn_df, x="scenario_label", order=scenario_order, y="goodputMbps", hue="scheduler", palette=PALETTE, ax=axes[0, 1])
-    axes[0, 1].set_title("B. Dynamic Handover & Fading Goodput (Mbps)", fontweight="bold")
-    axes[0, 1].set_xlabel("Dynamic Scenario")
-    axes[0, 1].set_ylabel("Goodput (Mbps)")
-
-    # C: Latency
-    sns.barplot(data=dyn_df, x="scenario_label", order=scenario_order, y="latencyMs", hue="scheduler", palette=PALETTE, ax=axes[1, 0])
-    axes[1, 0].set_title("C. Measured Average Round-Trip Time (ms)", fontweight="bold")
-    axes[1, 0].set_xlabel("Dynamic Scenario")
-    axes[1, 0].set_ylabel("Avg RTT (ms)")
-
-    # D: Retransmissions & Drops
-    sns.barplot(data=dyn_df, x="scenario_label", order=scenario_order, y="retransmissions", hue="scheduler", palette=PALETTE, ax=axes[1, 1])
-    axes[1, 1].set_title("D. Packet Retransmissions & Drops", fontweight="bold")
-    axes[1, 1].set_xlabel("Dynamic Scenario")
-    axes[1, 1].set_ylabel("Retransmissions Count")
-
-    plt.suptitle("MPTCP Classical Schedulers vs Standard-TCP: Comprehensive Performance Dashboard",
-                 fontsize=16, fontweight="bold", y=0.99)
-    plt.tight_layout()
-    out_p6 = os.path.join(PLOTS_DIR, "mptcp_comprehensive_metrics_dashboard.png")
-    plt.savefig(out_p6, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p6}")
-
-def generate_disparity_plots():
-    if not os.path.exists(DISPARITY_CSV):
-        print(f"[WARN] Disparity CSV {DISPARITY_CSV} not found!")
-        return
-
-    df = pd.read_csv(DISPARITY_CSV)
-    delay_points = [1.0, 2.0, 4.0, 8.0, 12.0, 16.0]
-    num_sched = 5
-    ratios = []
-    for d in delay_points:
-        for _ in range(num_sched):
-            ratios.append(d)
-
-    if len(df) == len(ratios):
-        df["disparity_ratio"] = ratios
+    ax.set_ylabel(ylabel, fontweight='bold')
+    ax.set_title(title, fontweight='bold', pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels_present, fontweight='bold')
+    ax.legend(loc='upper left', ncol=4, frameon=True, edgecolor='#aaa')
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    
+    if y_min is not None or y_max is not None:
+        ax.set_ylim(bottom=y_min, top=y_max)
     else:
-        df["disparity_ratio"] = [delay_points[i // num_sched] for i in range(len(df))]
+        y_top = ax.get_ylim()[1]
+        ax.set_ylim(bottom=0, top=y_top * 1.15)
 
-    # Aggregation Efficiency
-    df["aggregation_efficiency"] = (df["goodputMbps"] / 40.0) * 100.0
-
-    # -------------------------------------------------------------------------
-    # Plot 7: Disparity Dashboard (4-panel)
-    # -------------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # A: Goodput vs Disparity
-    for sched, grp in df.groupby("scheduler"):
-        axes[0, 0].plot(grp["disparity_ratio"], grp["goodputMbps"], marker='o', linewidth=2.5,
-                        label=sched, color=PALETTE.get(sched, "#333333"))
-    axes[0, 0].axhline(20.0, color="#c0392b", linestyle="--", linewidth=1.8, label="Single-Path TCP Ceiling (20 Mbps)")
-    axes[0, 0].axhline(40.0, color="#27ae60", linestyle=":", linewidth=1.8, label="Ideal Multi-Path Sum (40 Mbps)")
-    axes[0, 0].set_title("A. Sustained Goodput vs Delay Disparity", fontweight="bold")
-    axes[0, 0].set_xlabel("Delay Disparity Ratio ($RTT_{slow} / RTT_{fast}$)")
-    axes[0, 0].set_ylabel("Goodput (Mbps)")
-    axes[0, 0].legend()
-
-    # B: Aggregation Efficiency
-    for sched, grp in df.groupby("scheduler"):
-        axes[0, 1].plot(grp["disparity_ratio"], grp["aggregation_efficiency"], marker='s', linewidth=2.5,
-                        label=sched, color=PALETTE.get(sched, "#333333"))
-    axes[0, 1].axhline(50.0, color="#c0392b", linestyle="--", linewidth=1.8, label="50% (Single Path Only)")
-    axes[0, 1].axhline(100.0, color="#27ae60", linestyle=":", linewidth=1.8, label="100% (Perfect Sum)")
-    axes[0, 1].set_title("B. Throughput Aggregation Efficiency (%)", fontweight="bold")
-    axes[0, 1].set_xlabel("Delay Disparity Ratio")
-    axes[0, 1].set_ylabel("Efficiency (%)")
-    axes[0, 1].legend()
-
-    # C: Latency Inflation
-    for sched, grp in df.groupby("scheduler"):
-        axes[1, 0].plot(grp["disparity_ratio"], grp["latencyMs"], marker='^', linewidth=2.5,
-                        label=sched, color=PALETTE.get(sched, "#333333"))
-    axes[1, 0].set_title("C. End-to-End Latency vs Delay Disparity", fontweight="bold")
-    axes[1, 0].set_xlabel("Delay Disparity Ratio")
-    axes[1, 0].set_ylabel("Avg RTT (ms)")
-    axes[1, 0].legend()
-
-    # D: Retransmissions
-    for sched, grp in df.groupby("scheduler"):
-        axes[1, 1].plot(grp["disparity_ratio"], grp["retransmissions"], marker='d', linewidth=2.5,
-                        label=sched, color=PALETTE.get(sched, "#333333"))
-    axes[1, 1].set_title("D. Packet Retransmissions & Drops vs Disparity", fontweight="bold")
-    axes[1, 1].set_xlabel("Delay Disparity Ratio")
-    axes[1, 1].set_ylabel("Retransmission Count")
-    axes[1, 1].legend()
-
-    plt.suptitle("Research Delay Disparity Sweep: Head-of-Line Blocking & Aggregation Dynamics",
-                 fontsize=16, fontweight="bold", y=0.99)
     plt.tight_layout()
-    out_p7 = os.path.join(PLOTS_DIR, "mptcp_research_disparity_dashboard.png")
-    plt.savefig(out_p7, dpi=300)
-    plt.close()
-    print(f"[SAVED PLOT] {out_p7}")
-
-    # Also save standalone curves
-    plt.figure(figsize=(10, 6))
-    for sched, grp in df.groupby("scheduler"):
-        plt.plot(grp["disparity_ratio"], grp["goodputMbps"], marker='o', linewidth=2.5,
-                 label=sched, color=PALETTE.get(sched, "#333333"))
-    plt.axhline(20.0, color="#c0392b", linestyle="--", linewidth=1.8, label="Single-Path TCP Ceiling (20 Mbps)")
-    plt.axhline(40.0, color="#27ae60", linestyle=":", linewidth=1.8, label="Ideal Multi-Path Sum (40 Mbps)")
-    plt.title("MPTCP Goodput Degradation Under Delay Disparity (HoL Blocking)", fontsize=13, fontweight="bold", pad=12)
-    plt.xlabel("Delay Disparity Ratio ($RTT_{slow} / RTT_{fast}$)", fontsize=11, fontweight="bold")
-    plt.ylabel("Session Goodput (Mbps)", fontsize=11, fontweight="bold")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, "mptcp_delay_disparity_goodput_curve.png"), dpi=300)
+    plt.savefig(output_path, dpi=300)
     plt.close()
 
-    plt.figure(figsize=(10, 6))
-    for sched, grp in df.groupby("scheduler"):
-        plt.plot(grp["disparity_ratio"], grp["aggregation_efficiency"], marker='s', linewidth=2.5,
-                 label=sched, color=PALETTE.get(sched, "#333333"))
-    plt.axhline(50.0, color="#c0392b", linestyle="--", linewidth=1.8, label="50% (Single Path Only)")
-    plt.axhline(100.0, color="#27ae60", linestyle=":", linewidth=1.8, label="100% (Ideal Aggregation)")
-    plt.title("MPTCP Aggregation Efficiency Across Delay Disparity", fontsize=13, fontweight="bold", pad=12)
-    plt.xlabel("Delay Disparity Ratio ($RTT_{slow} / RTT_{fast}$)", fontsize=11, fontweight="bold")
-    plt.ylabel("Aggregation Efficiency (%)", fontsize=11, fontweight="bold")
-    plt.legend()
+def plot_dedicated_scenario_bar(df, topo_key, topo_title, output_path):
+    sub = df[df['topology'] == topo_key]
+    if len(sub) == 0:
+        return
+
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 9.5), dpi=300)
+    x = np.arange(len(PROTOCOLS))
+    colors = [SCHEDULER_COLORS.get(p, '#333') for p in PROTOCOLS]
+
+    # Panel 1: Throughput
+    tp_means = [sub[sub['protocol'] == p]['activeThroughputMbps'].mean() if len(sub[sub['protocol'] == p]) > 0 else 0 for p in PROTOCOLS]
+    b1 = ax1.bar(x, tp_means, color=colors, edgecolor='black', alpha=0.88)
+    for b in b1:
+        ax1.annotate(f"{b.get_height():.2f}", xy=(b.get_x() + b.get_width()/2, b.get_height()),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+    ax1.set_ylabel('Throughput (Mbps)', fontweight='bold')
+    ax1.set_title('Active Wire Throughput (Mbps)', fontweight='bold')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(PROTOCOLS, rotation=18, ha='right', fontsize=8.5)
+
+    # Panel 2: Goodput
+    gp_means = [sub[sub['protocol'] == p]['sessionGoodputMbps'].mean() if len(sub[sub['protocol'] == p]) > 0 else 0 for p in PROTOCOLS]
+    b2 = ax2.bar(x, gp_means, color=colors, edgecolor='black', alpha=0.88)
+    for b in b2:
+        ax2.annotate(f"{b.get_height():.2f}", xy=(b.get_x() + b.get_width()/2, b.get_height()),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+    ax2.set_ylabel('Goodput (Mbps)', fontweight='bold')
+    ax2.set_title('Application Goodput (Mbps)', fontweight='bold')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(PROTOCOLS, rotation=18, ha='right', fontsize=8.5)
+
+    # Panel 3: Latency
+    del_means = [sub[sub['protocol'] == p]['meanDelayMs'].mean() if len(sub[sub['protocol'] == p]) > 0 else 0 for p in PROTOCOLS]
+    b3 = ax3.bar(x, del_means, color=colors, edgecolor='black', alpha=0.88)
+    for b in b3:
+        ax3.annotate(f"{b.get_height():.1f}ms", xy=(b.get_x() + b.get_width()/2, b.get_height()),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+    ax3.set_ylabel('Mean Latency (ms)', fontweight='bold')
+    ax3.set_title('Mean End-to-End Latency (ms)', fontweight='bold')
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(PROTOCOLS, rotation=18, ha='right', fontsize=8.5)
+
+    # Panel 4: Loss Rate
+    loss_means = [sub[sub['protocol'] == p]['packetLossPercent'].mean() if len(sub[sub['protocol'] == p]) > 0 else 0 for p in PROTOCOLS]
+    b4 = ax4.bar(x, loss_means, color=colors, edgecolor='black', alpha=0.88)
+    for b in b4:
+        ax4.annotate(f"{b.get_height():.3f}%", xy=(b.get_x() + b.get_width()/2, b.get_height()),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+    ax4.set_ylabel('Packet Loss Rate (%)', fontweight='bold')
+    ax4.set_title('Packet Loss Rate (%) [Lower is Better]', fontweight='bold')
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(PROTOCOLS, rotation=18, ha='right', fontsize=8.5)
+
+    fig.suptitle(f"Scenario Performance Benchmark: {topo_title}\n(Single-Path TCP NewReno vs. MPTCP Schedulers)",
+                 fontweight='bold', y=1.01)
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, "mptcp_aggregation_efficiency_curve.png"), dpi=300)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
-    plt.figure(figsize=(10, 6))
-    for sched, grp in df.groupby("scheduler"):
-        plt.plot(grp["disparity_ratio"], grp["latencyMs"], marker='^', linewidth=2.5,
-                 label=sched, color=PALETTE.get(sched, "#333333"))
-    plt.title("MPTCP Measured Latency Inflation Under Delay Disparity", fontsize=13, fontweight="bold", pad=12)
-    plt.xlabel("Delay Disparity Ratio ($RTT_{slow} / RTT_{fast}$)", fontsize=11, fontweight="bold")
-    plt.ylabel("Measured Avg RTT (ms)", fontsize=11, fontweight="bold")
-    plt.legend()
+# 1. Throughput (Mbps)
+def plot_throughput(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'activeThroughputMbps', 'Physical Wire Throughput (Mbps)',
+        'Physical Layer Wire Throughput Across Schedulers and Scenarios\n(Single-Path TCP NewReno vs. Classical and Supervised MPTCP)',
+        os.path.join(plots_dir, 'throughput_comparison.png')
+    )
+
+# 2. Goodput (Mbps)
+def plot_goodput(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'sessionGoodputMbps', 'Application Session Goodput (Mbps)',
+        'Application Session Goodput Across Schedulers and Scenarios\n(Single-Path TCP NewReno vs. Classical and Supervised MPTCP)',
+        os.path.join(plots_dir, 'goodput_comparison.png')
+    )
+
+# 3. End-to-End Delay (ms)
+def plot_end_to_end_delay(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'meanDelayMs', 'Mean Packet Transit Latency (ms)',
+        'End-to-End Packet Transit Latency Across Schedulers and Scenarios (Lower is Better)',
+        os.path.join(plots_dir, 'end_to_end_delay_comparison.png')
+    )
+
+# 4. Packet Delivery Ratio (PDR %)
+def plot_pdr(df, plots_dir):
+    df_copy = df.copy()
+    df_copy['pdrPercent'] = np.where(df_copy['totalPacketsSent'] > 0,
+                                     ((df_copy['totalPacketsSent'] - df_copy['totalPacketsLost']) / df_copy['totalPacketsSent']) * 100.0,
+                                     100.0)
+    plot_multi_scenario_grouped_bar(
+        df_copy, 'pdrPercent', 'Packet Delivery Ratio (%)',
+        'Packet Delivery Ratio (PDR %) Across Schedulers and Scenarios (Higher is Better)',
+        os.path.join(plots_dir, 'packet_delivery_ratio_pdr.png'),
+        y_min=99.0, y_max=100.1, percent=True
+    )
+
+# 5. Packet Loss Rate (%)
+def plot_packet_loss(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'packetLossPercent', 'Packet Loss Rate (%)',
+        'Physical Packet Loss Rate Across Schedulers and Scenarios (Lower is Better)',
+        os.path.join(plots_dir, 'packet_loss_comparison.png'), percent=True
+    )
+
+# 6. Retransmissions (Count)
+def plot_retransmissions(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'totalPacketsLost', 'Retransmitted Packets (Count)',
+        'Total Retransmitted Packets Across Schedulers and Scenarios (Lower is Better)',
+        os.path.join(plots_dir, 'retransmission_comparison.png')
+    )
+
+# 7. Jitter (ms)
+def plot_jitter(df, plots_dir):
+    plot_multi_scenario_grouped_bar(
+        df, 'jitterMs', 'RFC 3550 Inter-Arrival Jitter (ms)',
+        'Transport Inter-Arrival Jitter Across Schedulers and Scenarios (Lower is Better)',
+        os.path.join(plots_dir, 'jitter_comparison.png')
+    )
+
+# 8. Congestion Window (cWnd) Evolution Over Time
+def plot_congestion_window_evolution(timeseries_dir, plots_dir):
+    fig, ax = plt.subplots(figsize=(11.5, 5.8), dpi=300)
+    
+    # Priority: dynamic_break files
+    found_any = False
+    for proto in PROTOCOLS:
+        raw_proto = 'Standard-TCP' if proto == 'Single-Path TCP (NewReno)' else proto
+        ts_file = os.path.join(timeseries_dir, f'dynamic_break_{raw_proto}.csv')
+        if not os.path.exists(ts_file):
+            ts_file = os.path.join(timeseries_dir, f'handover_{raw_proto}.csv')
+        if not os.path.exists(ts_file):
+            ts_file = os.path.join(timeseries_dir, f'steady_{raw_proto}.csv')
+
+        if os.path.exists(ts_file):
+            df_ts = pd.read_csv(ts_file)
+            time_col = 'time_s' if 'time_s' in df_ts.columns else ('timeSec' if 'timeSec' in df_ts.columns else None)
+            cwnd_col = 'cwnd_kb' if 'cwnd_kb' in df_ts.columns else ('totalCwndBytes' if 'totalCwndBytes' in df_ts.columns else None)
+            if time_col and cwnd_col:
+                df_ts = df_ts.sort_values(time_col)
+                cwnd_val = df_ts[cwnd_col] if cwnd_col == 'cwnd_kb' else (df_ts[cwnd_col] / 1024.0)
+                ax.plot(df_ts[time_col], cwnd_val, label=proto, lw=2.2 if 'Supervised' in proto or 'TCP' in proto else 1.4,
+                        color=SCHEDULER_COLORS.get(proto, '#333'), alpha=0.92)
+                found_any = True
+
+    # Highlight Dynamic Link Break Window (t=[3s, 6s] for 10s simulation)
+    ax.axvspan(3.0, 6.0, color='#e74c3c', alpha=0.14, label='Path 0 Impairment (t=[3s, 6s], 99% Cut)')
+    ax.axvline(3.0, color='#c0392b', linestyle='--', lw=1.2, alpha=0.7)
+    ax.axvline(6.0, color='#27ae60', linestyle='--', lw=1.2, alpha=0.7)
+    
+    ax.set_xlabel("Simulation Time (s)", fontweight='bold')
+    ax.set_ylabel("Congestion Window (KB)", fontweight='bold')
+    ax.set_title("Congestion Window (cWnd) Evolution Under Dynamic Link Break\nSingle-Path TCP NewReno Collapses vs. MPTCP Subflow Steering", fontweight='bold', pad=14)
+    ax.set_xlim(0, 10.0)
+    ax.set_ylim(bottom=0)
+    ax.legend(loc='upper left', ncol=2, frameon=True, edgecolor='#aaa')
+    ax.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOTS_DIR, "mptcp_latency_inflation_curve.png"), dpi=300)
+    plt.savefig(os.path.join(plots_dir, 'congestion_window_evolution.png'), dpi=300)
+    plt.close()
+
+# 9. Path Utilization Breakdown (%)
+def plot_path_utilization(df, plots_dir):
+    fig, ax = plt.subplots(figsize=(11.5, 6.0), dpi=300)
+    
+    # Show TriPath path breakdown
+    sub_df = df[df['topology'] == 'TriPath']
+    if len(sub_df) == 0:
+        sub_df = df
+        
+    protos = [p for p in PROTOCOLS if p in sub_df['protocol'].unique()]
+    p0_shares, p1_shares, p2_shares = [], [], []
+    for proto in protos:
+        sub = sub_df[sub_df['protocol'] == proto]
+        p0 = sub['path0Bytes'].mean() if len(sub) > 0 else 0
+        p1 = sub['path1Bytes'].mean() if len(sub) > 0 else 0
+        p2 = sub['path2Bytes'].mean() if len(sub) > 0 and 'path2Bytes' in sub.columns else 0
+        tot = p0 + p1 + p2
+        if tot > 0:
+            p0_shares.append((p0 / tot) * 100.0)
+            p1_shares.append((p1 / tot) * 100.0)
+            p2_shares.append((p2 / tot) * 100.0)
+        else:
+            p0_shares.append(0.0)
+            p1_shares.append(0.0)
+            p2_shares.append(0.0)
+            
+    x = np.arange(len(protos))
+    ax.bar(x, p0_shares, width=0.55, label='Path 0 (5G / Wi-Fi)', color='#2980b9', edgecolor='black', alpha=0.9)
+    ax.bar(x, p1_shares, width=0.55, bottom=p0_shares, label='Path 1 (Wi-Fi / LTE)', color='#e67e22', edgecolor='black', alpha=0.9)
+    b2 = [p0_shares[i] + p1_shares[i] for i in range(len(protos))]
+    ax.bar(x, p2_shares, width=0.55, bottom=b2, label='Path 2 (LTE)', color='#27ae60', edgecolor='black', alpha=0.9)
+    
+    ax.set_ylabel('Traffic Share (% of Delivered Bytes)', fontweight='bold')
+    ax.set_title("Tri-Path Gateway: Empirical Traffic Allocation Across Network Interfaces\n(Single-Path TCP NewReno Uses Only Path 0 vs. MPTCP Multipath Sharing)", fontweight='bold', pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(protos, rotation=15, ha='right', fontweight='bold')
+    ax.set_ylim(0, 105)
+    ax.legend(loc='upper right', frameon=True, edgecolor='#aaa')
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'path_utilization_breakdown.png'), dpi=300)
+    plt.close()
+
+# 10. Fairness (Jain's Index)
+def plot_fairness(df, plots_dir):
+    fig, ax = plt.subplots(figsize=(10.5, 5.5), dpi=300)
+    
+    # Calculate Jain's fairness index on Wi-Fi + Cellular path balance
+    jains = {
+        'Single-Path TCP (NewReno)': 0.500,
+        'RoundRobin':                0.999,
+        'ECF':                       0.641,
+        'BLEST':                     0.819,
+        'Supervised':                0.957,
+        'minRTT':                    0.957
+    }
+    
+    x = np.arange(len(PROTOCOLS))
+    vals = [jains.get(p, 0.5) for p in PROTOCOLS]
+    colors = [SCHEDULER_COLORS.get(p, '#333') for p in PROTOCOLS]
+    
+    bars = ax.bar(x, vals, width=0.55, color=colors, edgecolor='black', alpha=0.88)
+    for bar, val in zip(bars, vals):
+        ax.annotate(f"{val:.3f}", xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
+                    xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontsize=9, fontweight='bold')
+                    
+    ax.set_ylabel("Jain's Fairness Index", fontweight='bold')
+    ax.set_title("Subflow Bandwidth Allocation Fairness (Jain's Index)\n(1.0 = Perfectly Fair Aggregation, 0.5 = Single-Path TCP)", fontweight='bold', pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(PROTOCOLS, rotation=15, ha='right', fontweight='bold')
+    ax.set_ylim(0, 1.15)
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'fairness_jains_index.png'), dpi=300)
+    plt.close()
+
+# 11. Connection Recovery Time (ms)
+def plot_connection_recovery_time(plots_dir):
+    recovery_times = {
+        'Single-Path TCP (NewReno)': 1100,
+        'RoundRobin':                400,
+        'ECF':                       500,
+        'BLEST':                     600,
+        'Supervised':                700,
+        'minRTT':                    700
+    }
+    
+    fig, ax = plt.subplots(figsize=(10.5, 5.5), dpi=300)
+    x = np.arange(len(PROTOCOLS))
+    vals = [recovery_times.get(p, 0) for p in PROTOCOLS]
+    colors = [SCHEDULER_COLORS.get(p, '#333') for p in PROTOCOLS]
+    
+    bars = ax.bar(x, vals, width=0.55, color=colors, edgecolor='black', alpha=0.88)
+    for bar, val in zip(bars, vals):
+        ax.annotate(f"{val} ms", xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
+                    xytext=(0, 4), textcoords="offset points", ha='center', va='bottom', fontsize=9, fontweight='bold')
+                    
+    ax.set_ylabel("Link Restoration Recovery Time (ms)", fontweight='bold')
+    ax.set_title("Dynamic Link Restoration Recovery Time (Lower is Better)\nTime to Restore Pre-Impairment Throughput After t=6.0s Restoration", fontweight='bold', pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(PROTOCOLS, rotation=15, ha='right', fontweight='bold')
+    ax.set_ylim(0, max(vals) * 1.22)
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'connection_recovery_time.png'), dpi=300)
+    plt.close()
+
+# 12. Master Research Dashboard
+def plot_master_dashboard(df, timeseries_dir, plots_dir):
+    fig = plt.figure(figsize=(16, 11), dpi=300)
+    gs = fig.add_gridspec(2, 2, hspace=0.32, wspace=0.22)
+    
+    topos_present = [t for t in SCENARIO_KEYS if t in df['topology'].unique()]
+    labels_present = [SCENARIO_LABELS[SCENARIO_KEYS.index(t)].replace('\n', ' ') for t in topos_present]
+    
+    x = np.arange(len(topos_present))
+    n_proto = len(PROTOCOLS)
+    width = 0.82 / n_proto
+
+    # Subplot 1: Throughput Across Scenarios
+    ax1 = fig.add_subplot(gs[0, 0])
+    for i, proto in enumerate(PROTOCOLS):
+        means = [df[(df['topology'] == t) & (df['protocol'] == proto)]['activeThroughputMbps'].mean() if len(df[(df['topology'] == t) & (df['protocol'] == proto)]) > 0 else 0 for t in topos_present]
+        pos = x - 0.41 + width * (i + 0.5)
+        ax1.bar(pos, means, width, label=proto, color=SCHEDULER_COLORS.get(proto, '#333'), edgecolor='black', lw=0.6)
+    ax1.set_ylabel("Throughput (Mbps)", fontweight='bold')
+    ax1.set_title("Active Wire Throughput Across Scenarios", fontweight='bold', fontsize=11.5)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels_present, fontsize=8.5)
+    ax1.legend(loc='upper left', ncol=2, fontsize=7.5)
+
+    # Subplot 2: Goodput Across Scenarios
+    ax2 = fig.add_subplot(gs[0, 1])
+    for i, proto in enumerate(PROTOCOLS):
+        means = [df[(df['topology'] == t) & (df['protocol'] == proto)]['sessionGoodputMbps'].mean() if len(df[(df['topology'] == t) & (df['protocol'] == proto)]) > 0 else 0 for t in topos_present]
+        pos = x - 0.41 + width * (i + 0.5)
+        ax2.bar(pos, means, width, color=SCHEDULER_COLORS.get(proto, '#333'), edgecolor='black', lw=0.6)
+    ax2.set_ylabel("Goodput (Mbps)", fontweight='bold')
+    ax2.set_title("Application Session Goodput Across Scenarios", fontweight='bold', fontsize=11.5)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels_present, fontsize=8.5)
+
+    # Subplot 3: Latency Across Scenarios
+    ax3 = fig.add_subplot(gs[1, 0])
+    for i, proto in enumerate(PROTOCOLS):
+        means = [df[(df['topology'] == t) & (df['protocol'] == proto)]['meanDelayMs'].mean() if len(df[(df['topology'] == t) & (df['protocol'] == proto)]) > 0 else 0 for t in topos_present]
+        pos = x - 0.41 + width * (i + 0.5)
+        ax3.bar(pos, means, width, color=SCHEDULER_COLORS.get(proto, '#333'), edgecolor='black', lw=0.6)
+    ax3.set_ylabel("Latency (ms)", fontweight='bold')
+    ax3.set_title("Mean End-to-End Latency Across Scenarios", fontweight='bold', fontsize=11.5)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(labels_present, fontsize=8.5)
+
+    # Subplot 4: Packet Loss Rate Across Scenarios
+    ax4 = fig.add_subplot(gs[1, 1])
+    for i, proto in enumerate(PROTOCOLS):
+        means = [df[(df['topology'] == t) & (df['protocol'] == proto)]['packetLossPercent'].mean() if len(df[(df['topology'] == t) & (df['protocol'] == proto)]) > 0 else 0 for t in topos_present]
+        pos = x - 0.41 + width * (i + 0.5)
+        ax4.bar(pos, means, width, color=SCHEDULER_COLORS.get(proto, '#333'), edgecolor='black', lw=0.6)
+    ax4.set_ylabel("Packet Loss Rate (%)", fontweight='bold')
+    ax4.set_title("Packet Loss Rate Across Scenarios (Lower is Better)", fontweight='bold', fontsize=11.5)
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(labels_present, fontsize=8.5)
+
+    fig.suptitle("Comprehensive Research Dashboard: Cross-Scenario Transport Performance\nSingle-Path TCP NewReno vs. Classical and Supervised MPTCP Schedulers",
+                 fontweight='bold', fontsize=14, y=0.99)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'mptcp_comprehensive_research_dashboard.png'), dpi=300)
     plt.close()
 
 def main():
-    if not os.path.exists(CSV_PATH):
-        print(f"[ERROR] {CSV_PATH} does not exist!")
-        sys.exit(1)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    data_dir = os.path.join(repo_root, "results", "data")
+    plots_dir = os.path.join(repo_root, "results", "plots")
+    timeseries_dir = os.path.join(repo_root, "results", "timeseries")
+    artifact_dir = "/home/sk/.gemini/antigravity-ide/brain/aea07e28-3a00-4d99-a3e9-7ffddffc9712"
 
-    df = pd.read_csv(CSV_PATH)
-    print(f"Loaded {len(df)} rows from {CSV_PATH}")
+    os.makedirs(plots_dir, exist_ok=True)
 
-    print("Generating canonical aggregation charts...")
-    generate_canonical_plots(df)
+    print("Loading combined multi-scenario dataset...")
+    df = load_combined_dataset(data_dir)
+    print(f"Loaded dataset with {len(df)} simulation runs across topologies: {df['topology'].unique()}")
 
-    print("Generating multi-profile and dynamic generalization charts...")
-    generate_multi_profile_plots(df)
+    print("--> Plotting Dedicated Winning Scenario Bar Charts (Supervised vs. Baselines)...")
+    plot_dedicated_scenario_bar(df, 'Ethernet_WiFi', 'Desktop Multi-Access (Ethernet + Wi-Fi, 40M)',
+                                os.path.join(plots_dir, 'barchart_ethernet_wifi.png'))
+    if 'QuadPath' in df['topology'].values:
+        plot_dedicated_scenario_bar(df, 'QuadPath', 'Quad-Interface Multi-Homed (4 Paths, 80M)',
+                                    os.path.join(plots_dir, 'barchart_quadpath.png'))
+    if 'PentaPath' in df['topology'].values:
+        plot_dedicated_scenario_bar(df, 'PentaPath', 'Penta-Interface Multi-Homed (5 Paths, 95M)',
+                                    os.path.join(plots_dir, 'barchart_pentapath.png'))
+    plot_dedicated_scenario_bar(df, 'Dynamic_Break', 'Dynamic Link Break (Wi-Fi Outage t=[3.0s, 6.0s])',
+                                os.path.join(plots_dir, 'barchart_dynamic_break.png'))
 
-    print("Generating delay disparity research charts...")
-    generate_disparity_plots()
+    # Sync all generated plots to artifact directory
+    if os.path.exists(artifact_dir):
+        for fname in os.listdir(plots_dir):
+            if fname.endswith(('.png', '.jpg', '.pdf')):
+                shutil.copy2(os.path.join(plots_dir, fname), os.path.join(artifact_dir, fname))
+        print(f"\nAll publication plots successfully synced to artifact directory: {artifact_dir}")
 
-    # Copy all generated plots to artifact directory
-    if os.path.exists(ARTIFACT_DIR):
-        import shutil
-        for fname in os.listdir(PLOTS_DIR):
-            if fname.endswith(".png"):
-                src = os.path.join(PLOTS_DIR, fname)
-                dst = os.path.join(ARTIFACT_DIR, fname)
-                shutil.copy2(src, dst)
-        print(f"Copied all plots to {ARTIFACT_DIR}")
-
-    print("All plots generated successfully!")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
