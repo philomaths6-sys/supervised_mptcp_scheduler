@@ -1,0 +1,3 @@
+time_s,path,rate_mbps,delay_ms,loss
+3.0,0,21.25,,
+6.0,0,42.50,,

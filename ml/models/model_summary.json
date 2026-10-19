@@ -1,0 +1,75 @@
+{
+  "selected_model": "ExtraTrees",
+  "metrics": {
+    "Ridge": {
+      "cv_mae": 26.7722,
+      "val_mae": 44.8755,
+      "val_rmse": 70.9675,
+      "val_r2": 0.5402,
+      "joblib_path": "/home/sk/Desktop/sk_Desktop/mptcp_scheduler/ml/models/model_ridge.joblib"
+    },
+    "DecisionTree": {
+      "cv_mae": 16.2648,
+      "val_mae": 27.5688,
+      "val_rmse": 39.4728,
+      "val_r2": 0.8577,
+      "joblib_path": "/home/sk/Desktop/sk_Desktop/mptcp_scheduler/ml/models/model_decisiontree.joblib"
+    },
+    "RandomForest": {
+      "cv_mae": 16.6161,
+      "val_mae": 23.0147,
+      "val_rmse": 34.1539,
+      "val_r2": 0.8935,
+      "joblib_path": "/home/sk/Desktop/sk_Desktop/mptcp_scheduler/ml/models/model_randomforest.joblib"
+    },
+    "ExtraTrees": {
+      "cv_mae": 8.7917,
+      "val_mae": 16.7333,
+      "val_rmse": 27.6959,
+      "val_r2": 0.93,
+      "joblib_path": "/home/sk/Desktop/sk_Desktop/mptcp_scheduler/ml/models/model_extratrees.joblib"
+    }
+  },
+  "mean": [
+    108.9209704958966,
+    106.02129729928214,
+    1.3920061780527657,
+    12743.126370095655,
+    10912.590427843159,
+    1830.5359422524955,
+    0.054265081303052,
+    1.4308493726332765,
+    0.5033781920916014,
+    0.4721528262655775,
+    1.0510796602416752,
+    1.9932436154001505
+  ],
+  "scale": [
+    54.74882082191312,
+    53.58006906365996,
+    3.653812524377857,
+    45475.969512402735,
+    44239.80261708553,
+    9328.992799015941,
+    0.22490333531031745,
+    0.7501083452106773,
+    0.3017659262999585,
+    0.4874481947314819,
+    0.16008295508580964,
+    0.08191908121425903
+  ],
+  "features": [
+    "feat_0_rtt_ms",
+    "feat_1_min_rtt_ms",
+    "feat_2_bw_mbps",
+    "feat_3_cwnd",
+    "feat_4_inflight",
+    "feat_5_avail_win",
+    "feat_6_loss_rate",
+    "feat_7_rtt_ratio",
+    "feat_8_bw_share",
+    "feat_9_win_headroom",
+    "feat_10_rtt_inflation",
+    "feat_11_n_paths"
+  ]
+}
